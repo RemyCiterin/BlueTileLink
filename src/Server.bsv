@@ -117,7 +117,6 @@ module mkAcquireFSM
       valid <= True;
       index <= idx;
     endaction
-
   endfunction
 
   method Action setSource(Bit#(sourceW) src)
@@ -393,6 +392,7 @@ interface TileLinkServerFSM#(type indexT, `TL_ARGS_DECL);
   method Action setSource(Bit#(sourceW) source);
 
   method Action acquireBlock(Grow grow, indexT idx, Bit#(addrW) addr);
+  method Action acquirePerms(Grow grow, Bit#(addrW) addr);
   method ActionValue#(PermTL) acquireAck();
 
   method Action releaseBlock(Reduce reduce, indexT idx, Bit#(addrW) addr);

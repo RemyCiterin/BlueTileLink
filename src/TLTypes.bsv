@@ -237,11 +237,11 @@ endfunction
 
 typedef Vector#(n,TLSlave#(`TL_ARGS)) VecTLSlave#(numeric type n,`TL_ARGS_DECL);
 
-module mkVectorTLSlave#(TLSlave#(`TL_ARGS) slave) (VecTLSlave#(n, `TL_ARGS));
-  Reg#(Bit#(TAdd#(1, TExp#(sizeW)))) sizeA <- mkReg(0);
-  Reg#(Bit#(TAdd#(1, TExp#(sizeW)))) sizeC <- mkReg(0);
-  Reg#(Bit#(TLog#(n))) stateA <- mkReg(?);
-  Reg#(Bit#(TLog#(n))) stateC <- mkReg(?);
+module mkVectorTLSlave#(TLSlave#(`TL_ARGS) slave) (Vector#(n, TLSlave#(`TL_ARGS)));
+  Reg#(Bit#(addrW)) sizeA <- mkReg(0);
+  Reg#(Bit#(addrW)) sizeC <- mkReg(0);
+  Reg#(Bit#(TLog#(n))) stateA <- mkReg(0);
+  Reg#(Bit#(TLog#(n))) stateC <- mkReg(0);
 
   Bit#(sizeW) logDataW = fromInteger(valueOf(TLog#(dataW)));
 
@@ -257,6 +257,7 @@ module mkVectorTLSlave#(TLSlave#(`TL_ARGS) slave) (VecTLSlave#(n, `TL_ARGS));
           action
             Bool first = sizeA == 0;
             Bool last =
+              !hasDataA(msg) ||
               sizeA == fromInteger(valueOf(dataW)) ||
               (sizeA == 0 && logDataW >= msg.size);
 
@@ -277,6 +278,7 @@ module mkVectorTLSlave#(TLSlave#(`TL_ARGS) slave) (VecTLSlave#(n, `TL_ARGS));
           action
             Bool first = sizeC == 0;
             Bool last =
+              !hasDataC(msg) ||
               sizeC == fromInteger(valueOf(dataW)) ||
               (sizeC == 0 && logDataW >= msg.size);
 

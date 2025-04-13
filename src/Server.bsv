@@ -279,6 +279,7 @@ module mkBurstFSM
     action
       valid[0] <= False;
 
+      $display("receive release ack");
       case (message.opcode) matches
         tagged ReleaseData .* : slave.channelD.deq;
         tagged Release     .* : slave.channelD.deq;

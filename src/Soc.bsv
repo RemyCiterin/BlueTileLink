@@ -94,22 +94,24 @@ module mkCPU_SIM(Empty);
     endmethod
   endinterface;
 
+  Bit#(sizeW) logSize = 4;
+
   Vector#(2, TLSlave#(AddrW, DataW, SizeW, SourceW, SinkW)) slaves <-
     mkVectorTLSlave(slave);
 
   AcquireFSM#(Bit#(32), AddrW, DataW, SizeW, SourceW, SinkW) acquireM1 <-
-    mkAcquireFSM(4, bram, slaves[0]);
+    mkAcquireFSM(logSize, bram, slaves[0]);
 
   ReleaseFSM#(Bit#(32), AddrW, DataW, SizeW, SourceW, SinkW) releaseM1 <-
-    mkReleaseFSM(4, bram, slaves[0]);
+    mkReleaseFSM(logSize, bram, slaves[0]);
 
   AcquireFSM#(Bit#(32), AddrW, DataW, SizeW, SourceW, SinkW) acquireM2 <-
-    mkAcquireFSM(4, bram, slaves[0]);
+    mkAcquireFSM(logSize, bram, slaves[1]);
 
   ReleaseFSM#(Bit#(32), AddrW, DataW, SizeW, SourceW, SinkW) releaseM2 <-
-    mkReleaseFSM(4, bram, slaves[0]);
+    mkReleaseFSM(logSize, bram, slaves[1]);
 
-  mkTileLinkClientFSM(0, 4, master, rom, vec(12, 4));
+  mkTileLinkClientFSM(0, logSize, master, rom, vec(12, 4));
 
   Reg#(PermTL) probePerm1 <- mkReg(?);
   Reg#(Bit#(AddrW)) probeAddr1 <- mkReg(?);

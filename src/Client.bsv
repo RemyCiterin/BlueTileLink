@@ -92,13 +92,15 @@ module mkTileLinkClientFSM#(
 
   rule receiveChannelA if (state == IDLE);
     $display("Receive channel A request");
-    grantSize[0] <= 1 << master.channelA.first.size;
     grantAddr[0] <= master.channelA.first.address;
     channelA <= master.channelA.first;
+    grantSize[0] <= 1 << logSize;
     probeCount <= numSource;
     master.channelA.deq;
     state <= PROBE_WAIT;
     probeNext <= 0;
+
+    doAssert(master.channelA.first.size == logSize, "Invalid channel C request size");
   endrule
 
   rule sendProbe if (state == PROBE_WAIT && probeNext < numSource);
@@ -195,10 +197,7 @@ module mkTileLinkClientFSM#(
     master.channelC.deq;
     let msg = master.channelC.first;
 
-    doAssert(
-      msg.size >= logDataW,
-      $format("Only release message of size >= %d are accepted, got %d", logDataW, msg.size)
-    );
+    doAssert(msg.size == logSize, "Invalid channel C request size");
 
     master.channelD.enq(ChannelD{
       opcode: ReleaseAck,
@@ -220,10 +219,7 @@ module mkTileLinkClientFSM#(
     Bit#(addrW) addr = state == RELEASE_BURST ? releaseAddr : msg.address;
     Bool first = state != RELEASE_BURST;
 
-    doAssert(
-      msg.size >= logDataW,
-      $format("Only release message of size >= %d are accepted, got %d", logDataW, msg.size)
-    );
+    doAssert(msg.size == logSize, "Invalid channel C request size");
 
     bram.write(addr >> logDataW, msg.data);
 

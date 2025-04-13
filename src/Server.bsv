@@ -13,7 +13,7 @@
 //      ^
 //      |
 //      v
-//   Manager
+//  ServerFSM
 //      ^
 //      | TL
 //      v
@@ -73,8 +73,13 @@ module mkAcquireFSM
       slave.channelD.first.opcode matches tagged GrantData .p &&&
       slave.channelD.first.source == source
     );
-    channelD <= slave.channelD.first;
+    doAssert(
+      slave.channelD.first.size == logSize,
+      "Grant responses must have the same size that their associated Acquire request"
+    );
+
     slave.channelD.deq();
+    channelD <= slave.channelD.first;
     perm <= p == N ? N : p == T ? T : B;
 
     bram.write(index, slave.channelD.first.data);
@@ -82,6 +87,13 @@ module mkAcquireFSM
 
     size <= size - fromInteger(valueOf(dataW));
     index <= index + 1;
+
+    if (size == fromInteger(valueOf(dataW))) begin
+      slave.channelE.enq(ChannelE{
+        sink: slave.channelD.first.sink,
+        opcode: GrantAck
+      });
+    end
   endrule
 
   rule receiveGrant
@@ -89,6 +101,16 @@ module mkAcquireFSM
       slave.channelD.first.opcode matches tagged Grant .p &&&
       slave.channelD.first.source == source
     );
+    doAssert(
+      slave.channelD.first.size == logSize,
+      "Grant responses must have the same size that their associated Acquire request"
+    );
+
+    doAssert(
+      !grantStarted && size == 1,
+      "Grant burst must contain only one message, otherwise use GrantData"
+    );
+
     slave.channelD.deq();
     channelD <= slave.channelD.first;
     perm <= p == N ? N : p == T ? T : B;
@@ -97,6 +119,11 @@ module mkAcquireFSM
 
     size <= 0;
     index <= index + 1;
+
+    slave.channelE.enq(ChannelE{
+      sink: slave.channelD.first.sink,
+      opcode: GrantAck
+    });
   endrule
 
   function Action doAcquire(OpcodeA opcode, Bit#(indexW) idx, Bit#(addrW) addr);
@@ -130,7 +157,7 @@ module mkAcquireFSM
   method Action acquirePerms(Grow grow, Bit#(addrW) addr)
     if (started && !valid);
     action
-      size <= fromInteger(valueOf(dataW));
+      size <= 1; // magic number used for some assert
       doAcquire(AcquirePerms(grow), ?, addr);
     endaction
   endmethod
@@ -222,9 +249,9 @@ module mkBurstFSM
     if (started && !valid[1]);
     action
       let msg = ChannelC{
-        size: logSize,
         opcode: opcode,
         source: source,
+        size: logSize,
         address: addr,
         data: ?
       };
@@ -264,129 +291,128 @@ endmodule
 interface ReleaseFSM#(type indexT, `TL_ARGS_DECL);
   method Action setSource(Bit#(sourceW) source);
 
-  method Action releaseBlock
-    (Reduce reduce, indexT idx, Bit#(addrW) addr);
+  method ActionValue#(Tuple2#(Bit#(addrW), PermTL)) probeBlock;
+  method Action probeAck(Reduce reduce, indexT idx);
+  method Action probeFinish();
+
+
+  method Action releaseBlock(Reduce reduce, indexT index, Bit#(addrW) addr);
   method Action releaseAck();
 endinterface
+
+
+typedef enum {
+  // Wait to receive a source identifier
+  INIT,
+
+  // Ready to receive a probe request or an invalidation
+  IDLE,
+
+  // Wait for the cache to search for an address
+  PROBE_WAIT,
+
+  // Perform a probe burst
+  PROBE_BURST,
+
+  // Perform a probe burst
+  RELEASE_BURST
+} ReleaseState deriving(Bits, FShow, Eq);
 
 module mkReleaseFSM
   #(Bit#(sizeW) logSize, Bram#(Bit#(indexW), Byte#(dataW)) bram, TLSlave#(`TL_ARGS) slave)
   (ReleaseFSM#(Bit#(indexW), `TL_ARGS));
 
-  BurstFSM#(Bit#(indexW), `TL_ARGS) burstM <- mkBurstFSM(bram, slave);
-
-  method Action setSource(Bit#(sourceW) source) =
-    burstM.setSource(source);
-
-  method Action releaseBlock(Reduce reduce, Bit#(indexW) index, Bit#(addrW) addr) =
-    burstM.startBurst(
-      reduce == BtoN || reduce == NtoN ? Release(reduce) : ReleaseData(reduce),
-      index, addr, logSize
-    );
-
-  method Action releaseAck =
-    burstM.finishBurst();
-endmodule
-
-interface ProbeFSM#(type indexT, `TL_ARGS_DECL);
-  method Action setSource(Bit#(sourceW) source);
-
-  method ActionValue#(Tuple2#(Bit#(addrW), PermTL)) probeBlock;
-
-  method Action probeAck(Reduce reduce, indexT idx);
-
-  method Action probeFinish();
-endinterface
-
-module mkProbeFSM
-  #(Bit#(sizeW) logSize, Bram#(Bit#(indexW), Byte#(dataW)) bram, TLSlave#(`TL_ARGS) slave)
-  (ProbeFSM#(Bit#(indexW), `TL_ARGS));
-
   Reg#(ChannelB#(`TL_ARGS)) message <- mkReg(?);
   Reg#(Bool) needData <- mkReg(?);
-  Reg#(PermTL) perms <- mkReg(?);
 
   Reg#(Bit#(sourceW)) source <- mkReg(?);
-  Reg#(Bool) started <- mkReg(False);
-
-  Reg#(Bool) toProbe <- mkReg(False);
 
   BurstFSM#(Bit#(indexW), `TL_ARGS) burstM <- mkBurstFSM(bram, slave);
 
-  Ehr#(2, Bool) valid <- mkEhr(False);
+  Ehr#(2, ReleaseState) state <- mkEhr(INIT);
 
-  rule receiveProbePerms
-    if (
-      slave.channelB.first.opcode matches tagged ProbePerms .p &&&
-      slave.channelB.first.source == source && started && !valid[1]
-    );
+  function ActionValue#(Tuple2#(Bit#(addrW), PermTL))
+    receiveProbe(Cap perm, Bool useData, ChannelB#(`TL_ARGS) msg);
+    actionvalue
 
-    let msg = slave.channelB.first;
-    perms <= p == T ? T : p == B ? B : N;
-    slave.channelB.deq;
-    needData <= False;
-    valid[1] <= True;
-    toProbe <= True;
-    message <= msg;
+      doAssert(
+        logSize == msg.size,
+        $format("Probe of size %d only are supported now", logSize)
+      );
 
-    doAssert(
-      logSize == msg.size,
-      $format("Probe of size %d only are supported now", logSize)
-    );
-  endrule
+      state[1] <= PROBE_WAIT;
+      slave.channelB.deq;
+      needData <= True;
+      message <= msg;
 
-  rule receiveProbeBlock
-    if (
-      slave.channelB.first.opcode matches tagged ProbeBlock .p &&&
-      slave.channelB.first.source == source && started && !valid[1]
-    );
+      return tuple2(msg.address, perm == T ? T : perm == B ? B : N);
+    endactionvalue
+  endfunction
 
-    let msg = slave.channelB.first;
-    perms <= p == T ? T : p == B ? B : N;
-    slave.channelB.deq;
-    needData <= True;
-    valid[1] <= True;
-    toProbe <= True;
-    message <= msg;
+  method ActionValue#(Tuple2#(Bit#(addrW), PermTL)) probeBlock
+    if (slave.channelB.first.source == source && state[1] == IDLE);
+    let ret = ?;
 
-    doAssert(
-      logSize == msg.size,
-      $format("Probe of size %d only are supported now", logSize)
-    );
-  endrule
+    case (slave.channelB.first.opcode) matches
+      tagged ProbeBlock .p : ret <- receiveProbe(p, True, slave.channelB.first);
+      tagged ProbePerms .p : ret <- receiveProbe(p, False, slave.channelB.first);
+      .opcode : begin
+        doAssert(
+          False, $format("Only probe requests are supported, got: ", fshow(opcode))
+        );
+      end
+    endcase
 
-  method ActionValue#(Tuple2#(Bit#(addrW), PermTL)) probeBlock if (toProbe);
-    toProbe <= False;
-    return tuple2(message.address, perms);
+    return ret;
   endmethod
 
-  method Action probeAck(Reduce reduce, Bit#(indexW) index);
+  method Action probeAck(Reduce reduce, Bit#(indexW) index)
+    if (state[1] == PROBE_WAIT);
     action
       $display("send burst");
+      state[1] <= PROBE_BURST;
       OpcodeC opcode = (reduce == TtoN || reduce == TtoB) && needData ?
         ProbeAckData(reduce) : ProbeAck(reduce);
       burstM.startBurst(opcode, index, message.address, logSize);
     endaction
   endmethod
 
-  method Action probeFinish;
+  method Action probeFinish
+    if (state[0] == PROBE_BURST);
     action
-      valid[0] <= False;
+      state[0] <= IDLE;
       $display("finish burst");
       burstM.finishBurst();
     endaction
   endmethod
 
   method Action setSource(Bit#(sourceW) src)
-    if (!started);
+    if (state[1] == INIT);
     action
       burstM.setSource(src);
-      started <= True;
+      state[1] <= IDLE;
       source <= src;
     endaction
   endmethod
-endmodule
 
+  method Action releaseBlock(Reduce reduce, Bit#(indexW) index, Bit#(addrW) addr)
+    if (state[1] == IDLE);
+    action
+      state[1] <= RELEASE_BURST;
+      burstM.startBurst(
+        reduce == BtoN || reduce == NtoN ? Release(reduce) : ReleaseData(reduce),
+        index, addr, logSize
+      );
+    endaction
+  endmethod
+
+  method Action releaseAck if (state[0] == RELEASE_BURST);
+    action
+      burstM.finishBurst();
+      state[0] <= IDLE;
+    endaction
+  endmethod
+endmodule
 
 interface TileLinkServerFSM#(type indexT, `TL_ARGS_DECL);
   method Action setSource(Bit#(sourceW) source);

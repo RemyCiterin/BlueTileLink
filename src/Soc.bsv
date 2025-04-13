@@ -2,12 +2,13 @@ import Ehr :: *;
 import Fifo :: *;
 import BlockRam :: *;
 import StmtFSM :: *;
+import Vector :: *;
+import BuildVector :: *;
 
 import Server :: *;
+import Client :: *;
 
 import TLTypes :: *;
-
-`include "CC.defines"
 
 module mkCPU(Empty);
 endmodule
@@ -25,11 +26,11 @@ module mkCPU_SIM(Empty);
     cycle <= cycle + 1;
   endrule
 
-  Fifo#(1, ChannelA#(AddrW, DataW, SizeW, SourceW, SinkW)) channelA <- mkPipelineFifo;
-  Fifo#(1, ChannelB#(AddrW, DataW, SizeW, SourceW, SinkW)) channelB <- mkPipelineFifo;
-  Fifo#(1, ChannelC#(AddrW, DataW, SizeW, SourceW, SinkW)) channelC <- mkPipelineFifo;
-  Fifo#(1, ChannelD#(AddrW, DataW, SizeW, SourceW, SinkW)) channelD <- mkPipelineFifo;
-  Fifo#(1, ChannelE#(AddrW, DataW, SizeW, SourceW, SinkW)) channelE <- mkPipelineFifo;
+  Fifo#(2, ChannelA#(AddrW, DataW, SizeW, SourceW, SinkW)) channelA <- mkFifo;
+  Fifo#(2, ChannelB#(AddrW, DataW, SizeW, SourceW, SinkW)) channelB <- mkFifo;
+  Fifo#(2, ChannelC#(AddrW, DataW, SizeW, SourceW, SinkW)) channelC <- mkFifo;
+  Fifo#(2, ChannelD#(AddrW, DataW, SizeW, SourceW, SinkW)) channelD <- mkFifo;
+  Fifo#(2, ChannelE#(AddrW, DataW, SizeW, SourceW, SinkW)) channelE <- mkFifo;
 
   let slave = interface TLSlave;
     interface channelA = toFifoI(channelA);
@@ -47,118 +48,137 @@ module mkCPU_SIM(Empty);
     interface channelE = toFifoO(channelE);
   endinterface;
 
-  Bram#(Bit#(32), Bit#(32)) bramCore <- mkSizedBramInit(4096, 0);
+  Bram#(Bit#(32), Bit#(32)) cacheCore <- mkSizedBramInit(4096, 0);
   Bram#(Bit#(32), Bit#(32)) bram = interface Bram;
     method Action write(Bit#(32) index, Bit#(32) data);
-      $display("BRAM at %d: write addr: %h data: %h", cycle, index, data);
-      bramCore.write(index, data);
+      $display("CACHE at %d: write addr: %h data: %h", cycle, index, data);
+      cacheCore.write(index, data);
     endmethod
 
     method Action read(Bit#(32) index);
-      $display("BRAM at %d: read request addr: %h", cycle, index);
-      bramCore.read(index);
+      $display("CACHE at %d: read request addr: %h", cycle, index);
+      cacheCore.read(index);
     endmethod
 
-    method response = bramCore.response;
-    method canDeq = bramCore.canDeq;
+    method response = cacheCore.response;
+    method canDeq = cacheCore.canDeq;
 
     method Action deq;
       action
-        $display("BRAM at %d: read response data: %h", cycle, bramCore.response);
-        bramCore.deq;
+        $display("CACHE at %d: read response data: %h", cycle, cacheCore.response);
+        cacheCore.deq;
       endaction
     endmethod
   endinterface;
 
-  AcquireFSM#(Bit#(32), AddrW, DataW, SizeW, SourceW, SinkW) acquireM <-
-    mkAcquireFSM(4, bram, slave);
+  Bram#(Bit#(32), Bit#(32)) romCore <- mkSizedBramInit(4096, 0);
+  Bram#(Bit#(32), Bit#(32)) rom = interface Bram;
+    method Action write(Bit#(32) index, Bit#(32) data);
+      $display("ROM at %d: write addr: %h data: %h", cycle, index, data);
+      romCore.write(index, data);
+    endmethod
 
-  ReleaseFSM#(Bit#(32), AddrW, DataW, SizeW, SourceW, SinkW) releaseM <-
-    mkReleaseFSM(4, bram, slave);
+    method Action read(Bit#(32) index);
+      $display("ROM at %d: read request addr: %h", cycle, index);
+      romCore.read(index);
+    endmethod
 
-  ProbeFSM#(Bit#(32), AddrW, DataW, SizeW, SourceW, SinkW) probeM <-
-    mkProbeFSM(4, bram, slave);
+    method response = romCore.response;
+    method canDeq = romCore.canDeq;
 
-  Reg#(PermTL) probePerm <- mkReg(?);
-  Reg#(Bit#(AddrW)) probeAddr <- mkReg(?);
+    method Action deq;
+      action
+        $display("ROM at %d: read response data: %h", cycle, romCore.response);
+        romCore.deq;
+      endaction
+    endmethod
+  endinterface;
+
+  Vector#(2, TLSlave#(AddrW, DataW, SizeW, SourceW, SinkW)) slaves <-
+    mkVectorTLSlave(slave);
+
+  AcquireFSM#(Bit#(32), AddrW, DataW, SizeW, SourceW, SinkW) acquireM1 <-
+    mkAcquireFSM(4, bram, slaves[0]);
+
+  ReleaseFSM#(Bit#(32), AddrW, DataW, SizeW, SourceW, SinkW) releaseM1 <-
+    mkReleaseFSM(4, bram, slaves[0]);
+
+  AcquireFSM#(Bit#(32), AddrW, DataW, SizeW, SourceW, SinkW) acquireM2 <-
+    mkAcquireFSM(4, bram, slaves[0]);
+
+  ReleaseFSM#(Bit#(32), AddrW, DataW, SizeW, SourceW, SinkW) releaseM2 <-
+    mkReleaseFSM(4, bram, slaves[0]);
+
+  mkTileLinkClientFSM(0, 4, master, rom, vec(12, 4));
+
+  Reg#(PermTL) probePerm1 <- mkReg(?);
+  Reg#(Bit#(AddrW)) probeAddr1 <- mkReg(?);
+  Reg#(PermTL) probePerm2 <- mkReg(?);
+  Reg#(Bit#(AddrW)) probeAddr2 <- mkReg(?);
 
   Stmt stmt = seq
     $display("Start BlueCoherent TestBench!");
-    acquireM.setSource(9);
-    releaseM.setSource(12);
-    probeM.setSource(12);
+    acquireM1.setSource(9);
+    releaseM1.setSource(12);
+
+    acquireM2.setSource(5);
+    releaseM2.setSource(4);
 
     par
       seq
-        par
-          seq
-            acquireM.acquireBlock(NtoT, 0, 0);
-            action
-              let perms <- acquireM.acquireAck();
-              $display("CACHE at %d: perms: ", cycle, fshow(perms));
-            endaction
+        acquireM1.acquireBlock(NtoT, 0, 0);
+        action
+          let perms <- acquireM1.acquireAck();
+          $display("CACHE 0 at %d: perms: ", cycle, fshow(perms));
+        endaction
 
-            releaseM.releaseBlock(TtoN, 0, 0);
-            releaseM.releaseAck();
-          endseq
-
-          seq
-            while (True) par
-              action
-                match {.addr, .perm} <- probeM.probeBlock();
-                $display("PROBE at %d: probe at address %h", cycle, addr);
-                probeAddr <= addr;
-                probePerm <= perm;
-              endaction
-
-              probeM.probeAck(probePerm == N ? TtoN : TtoB, 0);
-              probeM.probeFinish;
-            endpar
-          endseq
-        endpar
+        releaseM1.releaseBlock(TtoN, 0, 0);
+        releaseM1.releaseAck();
       endseq
 
       seq
-        $display("channelA: ", fshow(channelA.first));
-        repeat(4) channelD.enq(ChannelD{
-          opcode: GrantData(T),
-          size: channelA.first.size,
-          source: channelA.first.source,
-          sink: 0,
-          data: 42
-        });
-        channelA.deq;
+        acquireM2.acquireBlock(NtoT, 0, 0);
+        action
+          let perms <- acquireM2.acquireAck();
+          $display("CACHE 1 at %d: perms: ", cycle, fshow(perms));
+        endaction
 
-        repeat(4) channelC.deq;
-        channelD.enq(ChannelD{
-          opcode: ReleaseAck,
-          size: 4,
-          source: 12,
-          sink: 0,
-          data: ?
-        });
+        releaseM2.releaseBlock(TtoN, 0, 0);
+        releaseM2.releaseAck();
+      endseq
 
-        par
-          channelB.enq(ChannelB{
-            opcode: ProbeBlock(N),
-            address: 0,
-            size: 4,
-            source: 12
-          });
-          repeat(4) channelC.deq;
 
-          channelB.enq(ChannelB{
-            opcode: ProbeBlock(N),
-            address: 0,
-            size: 4,
-            source: 12
-          });
-          repeat(4) channelC.deq;
+      seq
+        while (True) par
+          action
+            match {.addr, .perm} <- releaseM2.probeBlock();
+            $display("PROBE at %d: probe at address %h", cycle, addr);
+            probeAddr2 <= addr;
+            probePerm2 <= perm;
+          endaction
+
+          releaseM2.probeAck(probePerm2 == N ? TtoN : TtoB, probeAddr2);
+          releaseM2.probeFinish;
         endpar
       endseq
-    endpar
 
-    $finish;
+
+      seq
+        while (True) par
+          action
+            match {.addr, .perm} <- releaseM1.probeBlock();
+            $display("PROBE at %d: probe at address %h", cycle, addr);
+            probeAddr1 <= addr;
+            probePerm1 <= perm;
+          endaction
+
+          releaseM1.probeAck(probePerm1 == N ? TtoN : TtoB, probeAddr1);
+          releaseM1.probeFinish;
+        endpar
+      endseq
+
+
+    endpar
   endseq;
 
   mkAutoFSM(stmt);

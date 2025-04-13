@@ -207,3 +207,93 @@ instance Connectable#(TLMaster#(`TL_ARGS), TLSlave#(`TL_ARGS));
   endmodule
 endinstance
 
+function Bool hasDataA(ChannelA#(`TL_ARGS) msg);
+  return msg.opcode == PutData;
+endfunction
+
+function Bool hasDataB(ChannelB#(`TL_ARGS) msg);
+  return False;
+endfunction
+
+function Bool hasDataC(ChannelC#(`TL_ARGS) msg);
+  return case (msg.opcode) matches
+    tagged ProbeAckData .* : True;
+    tagged ReleaseData .* : True;
+    default: False;
+  endcase;
+endfunction
+
+function Bool hasDataD(ChannelD#(`TL_ARGS) msg);
+  return case (msg.opcode) matches
+    tagged GrantData .* : True;
+    PutAckData : True;
+    default: False;
+  endcase;
+endfunction
+
+function Bool hasDataE(ChannelE#(`TL_ARGS) msg);
+  return False;
+endfunction
+
+typedef Vector#(n,TLSlave#(`TL_ARGS)) VecTLSlave#(numeric type n,`TL_ARGS_DECL);
+
+module mkVectorTLSlave#(TLSlave#(`TL_ARGS) slave) (VecTLSlave#(n, `TL_ARGS));
+  Reg#(Bit#(TAdd#(1, TExp#(sizeW)))) sizeA <- mkReg(0);
+  Reg#(Bit#(TAdd#(1, TExp#(sizeW)))) sizeC <- mkReg(0);
+  Reg#(Bit#(TLog#(n))) stateA <- mkReg(?);
+  Reg#(Bit#(TLog#(n))) stateC <- mkReg(?);
+
+  Bit#(sizeW) logDataW = fromInteger(valueOf(TLog#(dataW)));
+
+  Vector#(n, TLSlave#(`TL_ARGS)) ret = newVector;
+
+  for (Integer i=0; i < valueOf(n); i = i + 1) begin
+    ret[i] = interface TLSlave;
+      interface FifoI channelA;
+        method canEnq = (sizeA == 0 || fromInteger(i) == stateA) && slave.channelA.canEnq;
+
+        method Action enq(ChannelA#(`TL_ARGS) msg)
+          if (stateA == fromInteger(i) || sizeA == 0);
+          action
+            Bool first = sizeA == 0;
+            Bool last =
+              sizeA == fromInteger(valueOf(dataW)) ||
+              (sizeA == 0 && logDataW >= msg.size);
+
+            let size = first ? 1 << msg.size : sizeA;
+            sizeA <= last ? 0 : size - fromInteger(valueOf(dataW));
+            stateA <= fromInteger(i);
+
+            slave.channelA.enq(msg);
+          endaction
+        endmethod
+      endinterface
+
+      interface FifoI channelC;
+        method canEnq = (sizeC == 0 || fromInteger(i) == stateC) && slave.channelC.canEnq;
+
+        method Action enq(ChannelC#(`TL_ARGS) msg)
+          if (stateC == fromInteger(i) || sizeC == 0);
+          action
+            Bool first = sizeC == 0;
+            Bool last =
+              sizeC == fromInteger(valueOf(dataW)) ||
+              (sizeC == 0 && logDataW >= msg.size);
+
+            let size = first ? 1 << msg.size : sizeC;
+            sizeC <= last ? 0 : size - fromInteger(valueOf(dataW));
+            stateC <= fromInteger(i);
+
+            slave.channelC.enq(msg);
+          endaction
+        endmethod
+      endinterface
+
+      interface channelB = slave.channelB;
+      interface channelD = slave.channelD;
+      interface channelE = slave.channelE;
+    endinterface;
+  end
+
+  return ret;
+endmodule

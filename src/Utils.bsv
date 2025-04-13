@@ -12,10 +12,10 @@ endinstance
 function Action doAssert(Bool b, Fmt str);
   action
     if (!b) begin
-      `ifndef BSIM
+      //`ifdef BSIM
       $fdisplay(stderr, "\n%m: ASSERT FAIL!!");
       $fdisplay(stderr, "\n", str);
-      `endif
+      //`endif
       dynamicAssert(b, "");
     end
   endaction

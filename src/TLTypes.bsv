@@ -40,44 +40,44 @@ use to read or write data without caching.
 // Basic permissions as defined by the TileLink documentation
 typedef enum {
   N = 2'd0, B = 2'd1, T = 2'd2
-} PermTL deriving(Bits, FShow, Eq);
+} TLPerm deriving(Bits, FShow, Eq);
 
-instance Ord#(PermTL);
-    function Bool \< ( PermTL x, PermTL y );
+instance Ord#(TLPerm);
+    function Bool \< ( TLPerm x, TLPerm y );
         return pack(x) < pack(y);
     endfunction
-    //function Bool \<= ( PermTL x, PermTL y );
-    //    return pack(x) <= pack(y);
-    //endfunction
-    //function Bool \> ( PermTL x, PermTL y );
-    //    return pack(x) > pack(y);
-    //endfunction
-    //function Bool \>= ( PermTL x, PermTL y );
-    //    return pack(x) >= pack(y);
-    //endfunction
-    //function Ordering compare( PermTL x, PermTL y );
-    //    return compare(pack(x), pack(y));
-    //endfunction
-    //function PermTL min( PermTL x, PermTL y );
-    //    return x < y ? x : y;
-    //endfunction
-    //function PermTL max( PermTL x, PermTL y );
-    //    return x > y ? x : y;
-    //endfunction
+    function Bool \<= ( TLPerm x, TLPerm y );
+        return pack(x) <= pack(y);
+    endfunction
+    function Bool \> ( TLPerm x, TLPerm y );
+        return pack(x) > pack(y);
+    endfunction
+    function Bool \>= ( TLPerm x, TLPerm y );
+        return pack(x) >= pack(y);
+    endfunction
+    function Ordering compare( TLPerm x, TLPerm y );
+        return compare(pack(x), pack(y));
+    endfunction
+    function TLPerm min( TLPerm x, TLPerm y );
+        return x < y ? x : y;
+    endfunction
+    function TLPerm max( TLPerm x, TLPerm y );
+        return x > y ? x : y;
+    endfunction
 endinstance
 
-instance DefaultValue#(PermTL);
-  function PermTL defaultValue = N;
+instance DefaultValue#(TLPerm);
+  function TLPerm defaultValue = N;
 endinstance
 
 // Return if an agent have a read permission over a block
-function Bool hasReadPerm(PermTL perm);
+function Bool hasReadPerm(TLPerm perm);
   return perm > N;
 endfunction
 
 // Return if an agent have a write permissions over a block, note that this function
 // for the `T` permission, the result is valid only if the node doesn't have branches
-function Bool hasWritePerm(PermTL perm);
+function Bool hasWritePerm(TLPerm perm);
   return perm > T;
 endfunction
 
@@ -104,6 +104,23 @@ typedef enum {
 typedef enum {
   T = 0, B = 1, N = 2
 } Cap deriving(Bits, FShow, Eq);
+
+// Logical operations
+typedef enum {
+  XOR = 0,
+  OR = 1,
+  AND = 2,
+  SWAP = 3
+} TLLogical deriving(Bits, FShow, Eq);
+
+// Arithmetic operations
+typedef enum {
+  MIN = 0,
+  MAX = 1,
+  MINU = 2,
+  MAXU = 3,
+  ADD = 4
+} TLArithmetic deriving(Bits, FShow, Eq);
 
 typedef union tagged {
   Grow AcquireBlock;
@@ -299,3 +316,39 @@ module mkVectorTLSlave#(TLSlave#(`TL_ARGS) slave) (Vector#(n, TLSlave#(`TL_ARGS)
 
   return ret;
 endmodule
+
+function TLPerm reduceTo(Reduce reduce);
+  return case (reduce) matches
+    TtoB : B;
+    TtoN : N;
+    BtoN : N;
+    NtoN : N;
+    TtoT : T;
+    BtoB : B;
+  endcase;
+endfunction
+
+function TLPerm reduceFrom(Reduce reduce);
+  return case (reduce) matches
+    TtoB : T;
+    TtoN : T;
+    BtoN : B;
+    NtoN : N;
+    TtoT : T;
+    BtoB : B;
+  endcase;
+endfunction
+
+// Permission needed to perform a channelA transaction
+function TLPerm permChannelA(OpcodeA opcode);
+  return case (opcode) matches
+    tagged AcquirePerms BtoT : T;
+    tagged AcquirePerms NtoT : T;
+    tagged AcquirePerms NtoB : B;
+    tagged AcquireBlock BtoT : T;
+    tagged AcquireBlock NtoT : T;
+    tagged AcquireBlock NtoB : B;
+    PutData : T;
+    GetFull : B;
+  endcase;
+endfunction

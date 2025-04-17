@@ -4,9 +4,11 @@ import BlockRam :: *;
 import StmtFSM :: *;
 import Vector :: *;
 import BuildVector :: *;
+import BCache :: *;
+import Utils :: *;
 
-import Server :: *;
-import Client :: *;
+import TLServer :: *;
+import TLClient :: *;
 
 import TLTypes :: *;
 
@@ -16,21 +18,27 @@ endmodule
 typedef 32 AddrW;
 typedef 4 DataW;
 typedef 4 SinkW;
-typedef 4 SourceW;
+typedef 8 SourceW;
 typedef 8 SizeW;
+
+typedef 2 NCache;
 
 module mkCPU_SIM(Empty);
   Reg#(Bit#(32)) cycle <- mkReg(0);
 
   rule count_cycle;
     cycle <= cycle + 1;
+    if (cycle == 4096 + 200000) begin
+      $display("timeout!");
+      $finish;
+    end
   endrule
 
-  Fifo#(2, ChannelA#(AddrW, DataW, SizeW, SourceW, SinkW)) channelA <- mkFifo;
-  Fifo#(2, ChannelB#(AddrW, DataW, SizeW, SourceW, SinkW)) channelB <- mkFifo;
-  Fifo#(2, ChannelC#(AddrW, DataW, SizeW, SourceW, SinkW)) channelC <- mkFifo;
-  Fifo#(2, ChannelD#(AddrW, DataW, SizeW, SourceW, SinkW)) channelD <- mkFifo;
-  Fifo#(2, ChannelE#(AddrW, DataW, SizeW, SourceW, SinkW)) channelE <- mkFifo;
+  Fifo#(TAdd#(2, NCache), ChannelA#(AddrW, DataW, SizeW, SourceW, SinkW)) channelA <- mkFifo;
+  Fifo#(TAdd#(2, NCache), ChannelB#(AddrW, DataW, SizeW, SourceW, SinkW)) channelB <- mkFifo;
+  Fifo#(TAdd#(2, NCache), ChannelC#(AddrW, DataW, SizeW, SourceW, SinkW)) channelC <- mkFifo;
+  Fifo#(TAdd#(2, NCache), ChannelD#(AddrW, DataW, SizeW, SourceW, SinkW)) channelD <- mkFifo;
+  Fifo#(TAdd#(2, NCache), ChannelE#(AddrW, DataW, SizeW, SourceW, SinkW)) channelE <- mkFifo;
 
   let slave = interface TLSlave;
     interface channelA = toFifoI(channelA);
@@ -48,142 +56,112 @@ module mkCPU_SIM(Empty);
     interface channelE = toFifoO(channelE);
   endinterface;
 
-  Bram#(Bit#(32), Bit#(32)) cacheCore <- mkSizedBramInit(4096, 0);
-  Bram#(Bit#(32), Bit#(32)) bram = interface Bram;
-    method Action write(Bit#(32) index, Bit#(32) data);
-      $display("CACHE at %d: write addr: %h data: %h", cycle, index, data);
-      cacheCore.write(index, data);
-    endmethod
+  Bram#(Bit#(32), Bit#(32)) rom <- mkSizedBramInit(4096, 0);
 
-    method Action read(Bit#(32) index);
-      $display("CACHE at %d: read request addr: %h", cycle, index);
-      cacheCore.read(index);
-    endmethod
+  Bit#(sizeW) logSize = 6;
 
-    method response = cacheCore.response;
-    method canDeq = cacheCore.canDeq;
-
-    method Action deq;
-      action
-        $display("CACHE at %d: read response data: %h", cycle, cacheCore.response);
-        cacheCore.deq;
-      endaction
-    endmethod
-  endinterface;
-
-  Bram#(Bit#(32), Bit#(32)) romCore <- mkSizedBramInit(4096, 0);
-  Bram#(Bit#(32), Bit#(32)) rom = interface Bram;
-    method Action write(Bit#(32) index, Bit#(32) data);
-      $display("ROM at %d: write addr: %h data: %h", cycle, index, data);
-      romCore.write(index, data);
-    endmethod
-
-    method Action read(Bit#(32) index);
-      $display("ROM at %d: read request addr: %h", cycle, index);
-      romCore.read(index);
-    endmethod
-
-    method response = romCore.response;
-    method canDeq = romCore.canDeq;
-
-    method Action deq;
-      action
-        $display("ROM at %d: read response data: %h", cycle, romCore.response);
-        romCore.deq;
-      endaction
-    endmethod
-  endinterface;
-
-  Bit#(sizeW) logSize = 4;
-
-  Vector#(2, TLSlave#(AddrW, DataW, SizeW, SourceW, SinkW)) slaves <-
+  Vector#(NCache, TLSlave#(AddrW, DataW, SizeW, SourceW, SinkW)) slaves <-
     mkVectorTLSlave(slave);
 
-  AcquireFSM#(Bit#(32), AddrW, DataW, SizeW, SourceW, SinkW) acquireM1 <-
-    mkAcquireFSM(logSize, bram, slaves[0]);
+  function Bit#(32) encode(Bit#(20) tag, Bit#(6) index, Bit#(4) offset) =
+    {tag, index, offset, 0};
 
-  ReleaseFSM#(Bit#(32), AddrW, DataW, SizeW, SourceW, SinkW) releaseM1 <-
-    mkReleaseFSM(logSize, bram, slaves[0]);
+  function Tuple3#(Bit#(20),Bit#(6),Bit#(4)) decode(Bit#(32) addr) =
+    tuple3(addr[31:12], addr[11:6], addr[5:2]);
 
-  AcquireFSM#(Bit#(32), AddrW, DataW, SizeW, SourceW, SinkW) acquireM2 <-
-    mkAcquireFSM(logSize, bram, slaves[1]);
+  Integer nCache = valueOf(NCache);
+  Vector#(NCache, BCacheCore#(Bit#(20), Bit#(6), Bit#(4), AddrW, DataW, SizeW, SourceW, SinkW))
+    caches <- mapM(mkBCacheCore(BCacheConf{encode: encode, decode: decode}), slaves);
 
-  ReleaseFSM#(Bit#(32), AddrW, DataW, SizeW, SourceW, SinkW) releaseM2 <-
-    mkReleaseFSM(logSize, bram, slaves[1]);
+  Vector#(NCache, Bit#(SourceW)) sources = Vector::genWith(fromInteger);
+  mkTileLinkClientFSM(0, logSize, master, rom, sources);
 
-  mkTileLinkClientFSM(0, logSize, master, rom, vec(12, 4));
+  Vector#(NCache, Reg#(Bit#(32))) response <- replicateM(mkReg(0));
 
-  Reg#(PermTL) probePerm1 <- mkReg(?);
-  Reg#(Bit#(AddrW)) probeAddr1 <- mkReg(?);
-  Reg#(PermTL) probePerm2 <- mkReg(?);
-  Reg#(Bit#(AddrW)) probeAddr2 <- mkReg(?);
+  Vector#(NCache, Action) read = ?;
+  Vector#(NCache, Stmt) lock = ?;
+  Vector#(NCache, Stmt) unlock = ?;
+  Vector#(NCache, Stmt) increment = ?;
+  for (Integer i=0; i < nCache; i = i + 1) begin
+    read[i] = action
+      let x <- caches[i].response;
+      response[i] <= x;
+    endaction;
+
+    lock[i] = seq
+      response[i] <= 0;
+
+      while (response[i] == 0) seq
+        caches[i].start(0,0);
+        caches[i].matching(0, LoadReserve);
+        read[i];
+        $display(cycle, " try %d is %s", i, response[i] == 0 ? "success" : "fail");
+        if (response[i] == 0) seq
+          caches[i].start(0,0);
+          caches[i].matching(0,tagged StoreConditional {mask: 1, data: 1});
+          action
+            let x <- caches[i].success;
+            $display(cycle, " success: %b", x);
+            response[i] <= x ? 1 : 0;
+          endaction
+        endseq else
+          response[i] <= 0;
+      endseq
+    endseq;
+
+    unlock[i] = seq
+      caches[i].start(0,0);
+      caches[i].matching(0, tagged Store {data: 0, mask: 1});
+    endseq;
+
+    increment[i] = seq
+      caches[i].start(1,0);
+      caches[i].matching(1, Load);
+      read[i];
+
+      caches[i].start(1,0);
+      caches[i].matching(0, Load);
+      read[i];
+      $display(cycle, " counter %d: %d at %d", i, response[i], cycle);
+      caches[i].start(1,0);
+      caches[i].matching(0, tagged Store {data: response[i]+1, mask: 15});
+    endseq;
+  end
+
+  Stmt initCaches = seq noAction; endseq;
+  for (Integer i=0; i < nCache; i = i + 1) begin
+    initCaches = seq
+      caches[i].setSource(fromInteger(i));
+      initCaches;
+    endseq;
+  end
+
+  Reg#(Bit#(32)) counter <- mkReg(0);
+
+  Stmt main = seq noAction; endseq;
+  for (Integer i=0; i < nCache; i = i + 1) begin
+    main = seq
+      par
+        main;
+        seq
+          while (True) seq
+            lock[i];
+            increment[i];
+            doAssert(counter == response[i], "ERROR!");
+            counter <= counter + 1;
+            unlock[i];
+            delay(100);
+          endseq
+        endseq
+      endpar
+    endseq;
+  end
 
   Stmt stmt = seq
-    $display("Start BlueCoherent TestBench!");
-    acquireM1.setSource(9);
-    releaseM1.setSource(12);
-
-    acquireM2.setSource(5);
-    releaseM2.setSource(4);
-
-    par
-      seq
-        acquireM1.acquireBlock(NtoT, 0, 0);
-        action
-          let perms <- acquireM1.acquireAck();
-          $display("CACHE 0 at %d: perms: ", cycle, fshow(perms));
-        endaction
-
-        releaseM1.releaseBlock(TtoN, 0, 0);
-        releaseM1.releaseAck();
-      endseq
-
-      seq
-        acquireM2.acquireBlock(NtoT, 0, 0);
-        action
-          let perms <- acquireM2.acquireAck();
-          $display("CACHE 1 at %d: perms: ", cycle, fshow(perms));
-        endaction
-
-        releaseM2.releaseBlock(TtoN, 0, 0);
-        releaseM2.releaseAck();
-      endseq
-
-
-      seq
-        while (True) par
-          action
-            match {.addr, .perm} <- releaseM2.probeBlock();
-            $display("PROBE at %d: probe at address %h", cycle, addr);
-            probeAddr2 <= addr;
-            probePerm2 <= perm;
-          endaction
-
-          releaseM2.probeAck(probePerm2 == N ? TtoN : TtoB, probeAddr2);
-          releaseM2.probeFinish;
-        endpar
-      endseq
-
-
-      seq
-        while (True) par
-          action
-            match {.addr, .perm} <- releaseM1.probeBlock();
-            $display("PROBE at %d: probe at address %h", cycle, addr);
-            probeAddr1 <= addr;
-            probePerm1 <= perm;
-          endaction
-
-          releaseM1.probeAck(probePerm1 == N ? TtoN : TtoB, probeAddr1);
-          releaseM1.probeFinish;
-        endpar
-      endseq
-
-
-    endpar
+    initCaches;
+    main;
+    $finish;
   endseq;
 
   mkAutoFSM(stmt);
 endmodule
-
-

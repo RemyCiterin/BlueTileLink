@@ -10,6 +10,8 @@ import Ehr :: *;
 
 `include "TL.defines"
 
+Bool verbose = False;
+
 typedef enum {
   // Ready to receive a new acquire request
   IDLE = 0,
@@ -48,6 +50,74 @@ interface ReceiveBurstFSM#(numeric type nSource, `TL_ARGS_DECL);
   method Action putAck();
 endinterface
 
+interface AcquireBuffer#(`TL_ARGS_DECL);
+  // Write into the buffer a beat from a cache due to a probe request
+  method Action enqProbe(Byte#(dataW) value);
+
+  // Write into the buffer a beat from memory
+  method Action enqMem(Byte#(dataW) value);
+
+  // Read one word from the buffer
+  method ActionValue#(Byte#(dataW)) deq;
+
+  // Start a new transaction
+  method Action start;
+endinterface
+
+module mkAcquireBuffer#(Bit#(sizeW) logSize) (AcquireBuffer#(`TL_ARGS));
+  Bit#(sizeW) logDataW = fromInteger(valueOf(TLog#(dataW)));
+  Bit#(addrW) maxOffset = (1 << (logSize - logDataW)) - 1;
+
+  RegFile#(Bit#(addrW), Maybe#(Byte#(dataW))) buffer <- mkRegFile(0, maxOffset);
+
+  function Bit#(addrW) next(Bit#(addrW) idx) = idx == maxOffset ? 0 : idx + 1;
+  Reg#(Maybe#(Bit#(addrW))) memHead <- mkReg(Invalid);
+  Reg#(Bit#(addrW)) probeHead <- mkReg(0);
+  Reg#(Bit#(addrW)) deqHead <- mkReg(0);
+
+  Reg#(Bool) isInit <- mkReg(False);
+
+  rule init if (!isInit);
+    buffer.upd(deqHead, Invalid);
+    deqHead <= next(deqHead);
+
+    if (deqHead == maxOffset)
+      isInit <= True;
+  endrule
+
+  method Action enqProbe(Byte#(dataW) value) if (isInit);
+    action
+      buffer.upd(probeHead, Valid(value));
+      probeHead <= next(probeHead);
+    endaction
+  endmethod
+
+  method Action enqMem(Byte#(dataW) value)
+    if (isInit &&& memHead matches tagged Valid .head);
+    action
+      if (buffer.sub(head) == Invalid && deqHead <= head)
+        buffer.upd(head, Valid(value));
+
+      memHead <= head == maxOffset ? Invalid : Valid(head+1);
+    endaction
+  endmethod
+
+  method ActionValue#(Byte#(dataW)) deq
+    if (buffer.sub(deqHead) matches tagged Valid .data);
+    buffer.upd(deqHead, Invalid);
+    deqHead <= next(deqHead);
+    return data;
+  endmethod
+
+  method Action start if (memHead == Invalid);
+    action
+      doAssert(probeHead == 0, "probe head must be 0");
+      doAssert(deqHead == 0, "deq head must be 0");
+      memHead <= Valid(0);
+    endaction
+  endmethod
+endmodule
+
 
 module mkTileLinkClientFSM#(
     Bit#(sinkW) sink,
@@ -63,6 +133,13 @@ module mkTileLinkClientFSM#(
   Reg#(TLClientState) nextState <- mkReg(IDLE);
 
   Reg#(ChannelA#(`TL_ARGS)) channelA <- mkReg(?);
+  Reg#(TLPerm) acquirePerm <- mkReg(?);
+
+  AcquireBuffer#(`TL_ARGS) buffer <- mkAcquireBuffer(logSize);
+
+  function Bit#(addrW) bufIndex(Bit#(addrW) size);
+    return (size >> logDataW);
+  endfunction
 
   function Action startGrant();
     action
@@ -85,55 +162,75 @@ module mkTileLinkClientFSM#(
   Reg#(Bit#(addrW)) probeSize <- mkReg(0);
   Reg#(sourceIdx) probeCount <- mkReg(?);
   Reg#(sourceIdx) probeNext <- mkReg(?);
+  Reg#(Bool) exclusive <- mkReg(?);
 
   // Grant state
-  Ehr#(2, Bit#(addrW)) grantAddr <- mkEhr(0);
-  Ehr#(2, Bit#(addrW)) grantSize <- mkEhr(0);
+  Reg#(Bit#(addrW)) grantSize <- mkReg(0);
+
+  Ehr#(2, Bit#(addrW)) fillAddr <- mkEhr(0);
+  Ehr#(2, Bit#(addrW)) fillSize <- mkEhr(0);
+  Ehr#(2, Bool) needFill <- mkEhr(False);
 
   rule receiveChannelA if (state == IDLE);
-    $display("Receive channel A request");
-    grantAddr[0] <= master.channelA.first.address;
     channelA <= master.channelA.first;
-    grantSize[0] <= 1 << logSize;
+    grantSize <= 1 << logSize;
     probeCount <= numSource;
     master.channelA.deq;
     state <= PROBE_WAIT;
+    exclusive <= True;
     probeNext <= 0;
 
-    doAssert(master.channelA.first.size == logSize, "Invalid channel C request size");
+    if (verbose)
+      $display("Client: ", fshow(master.channelA.first));
+
+    buffer.start();
+    fillAddr[0] <= master.channelA.first.address;
+    fillSize[0] <= 1 << logSize;
+    needFill[0] <= True;
+
+    doAssert(master.channelA.first.size == logSize, "Invalid channel A request size");
   endrule
 
   rule sendProbe if (state == PROBE_WAIT && probeNext < numSource);
+    Cap cap = permChannelA(channelA.opcode) == T ? N : B;
+
     let source = sources[probeNext];
     master.channelB.enq(ChannelB{
       address: channelA.address,
-      opcode: ProbeBlock(N),
+      opcode: ProbeBlock(cap),
       size: channelA.size,
       source: source
     });
 
     probeNext <= probeNext + 1;
-    $display("Send Probe request to %d", source);
   endrule
 
   rule receiveProbeAck if (
       state == PROBE_WAIT &&&
-      master.channelC.first.opcode matches tagged ProbeAck .*
+      master.channelC.first.opcode matches tagged ProbeAck .reduce
     );
 
-    master.channelC.deq;
-    doAssert(probeCount == 0, "Receive more ProbeAck than expected");
-    probeCount <= probeCount - 1;
+    if (verbose)
+      $display("Client: ", fshow(master.channelC.first));
 
-    $display("Receive ProbeAck from %d", master.channelC.first.source);
+    master.channelC.deq;
+    doAssert(probeCount != 0, "Receive more ProbeAck than expected");
+
+    if (reduceTo(reduce) != N && master.channelC.first.source != channelA.source)
+      exclusive <= False;
+
+    probeCount <= probeCount - 1;
 
     if (probeCount == 1) state <= GRANT_BURST;
   endrule
 
   rule receiveProbeAckData if (
       (state == PROBE_WAIT || state == PROBE_BURST) &&&
-      master.channelC.first.opcode matches tagged ProbeAckData .*
+      master.channelC.first.opcode matches tagged ProbeAckData .reduce
     );
+
+    if (verbose)
+      $display("Client: ", fshow(master.channelC.first));
 
     doAssert(master.channelC.first.size == logSize, "Receive ProbeAckData of an incorrcet size");
     Bit#(addrW) size = state == PROBE_BURST ? probeSize : 1 << channelA.size;
@@ -141,10 +238,12 @@ module mkTileLinkClientFSM#(
     Bool first = state != PROBE_BURST;
 
     bram.write(addr >> logDataW, master.channelC.first.data);
-
-    $display("Receive ProbeAckData from %d", master.channelC.first.source);
+    buffer.enqProbe(master.channelC.first.data);
 
     master.channelC.deq;
+    if (reduceTo(reduce) != N && master.channelC.first.source != channelA.source)
+      exclusive <= False;
+
     doAssert(probeCount != 0, "Receive more ProbeAckData than expected");
 
     probeSize <= size - fromInteger(valueOf(dataW));
@@ -159,32 +258,43 @@ module mkTileLinkClientFSM#(
     end
   endrule
 
-  rule readRam if (state == GRANT_BURST && grantSize[1] > 0);
-    bram.read(grantAddr[1] >> logDataW);
+  rule rrequestRam if (needFill[1] && fillSize[1] > 0);
+    bram.read(fillAddr[1] >> logDataW);
+  endrule
+
+  (* preempts = "receiveProbeAckData,rresponseRam" *)
+  rule rresponseRam if (needFill[0] && fillSize[0] > 0);
+    bram.deq;
+    buffer.enqMem(bram.response);
+
+    fillSize[0] <= fillSize[0] - fromInteger(valueOf(dataW));
+    fillAddr[0] <= fillAddr[0] + fromInteger(valueOf(dataW));
+
+    if (fillSize[0] == fromInteger(valueOf(dataW))) begin
+      needFill[0] <= False;
+    end
   endrule
 
   rule sendGrant if (state == GRANT_BURST);
-    let data = bram.response;
-    bram.deq;
+    let data <- buffer.deq;
 
     master.channelD.enq(ChannelD{
+      opcode: GrantData(exclusive ? T : B),
       source: channelA.source,
       size: channelA.size,
-      opcode: GrantData(T),
       sink: sink,
       data: data
     });
 
-    grantSize[0] <= grantSize[0] - fromInteger(valueOf(dataW));
-    grantAddr[0] <= grantAddr[0] + fromInteger(valueOf(dataW));
-
-    if (grantSize[0] == fromInteger(valueOf(dataW))) begin
+    if (grantSize == fromInteger(valueOf(dataW))) begin
       state <= GRANT_WAIT;
     end
+
+    grantSize <= grantSize - fromInteger(valueOf(dataW));
   endrule
 
   rule receiveGrantAck
-    if (state == GRANT_WAIT && master.channelE.first.sink == sink);
+    if (state == GRANT_WAIT && !needFill[1] && master.channelE.first.sink == sink);
     master.channelE.deq;
     state <= IDLE;
   endrule

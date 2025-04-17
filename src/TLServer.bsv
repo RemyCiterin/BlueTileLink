@@ -33,12 +33,14 @@ import Ehr :: *;
 
 `include "TL.defines"
 
+Bool verbose = False;
+
 interface AcquireFSM#(type indexT, `TL_ARGS_DECL);
   method Action setSource(Bit#(sourceW) source);
 
   method Action acquireBlock(Grow grow, indexT idx, Bit#(addrW) addr);
   method Action acquirePerms(Grow grow, Bit#(addrW) addr);
-  method ActionValue#(PermTL) acquireAck();
+  method ActionValue#(TLPerm) acquireAck();
 endinterface
 
 /*
@@ -64,7 +66,7 @@ module mkAcquireFSM
   Reg#(Bool) valid <- mkReg(False);
 
   Reg#(ChannelD#(`TL_ARGS)) channelD <- mkReg(?);
-  Reg#(PermTL) perm <- mkReg(?);
+  Reg#(TLPerm) perm <- mkReg(?);
 
   Reg#(Bool) grantStarted <- mkReg(False);
 
@@ -77,6 +79,9 @@ module mkAcquireFSM
       slave.channelD.first.size == logSize,
       "Grant responses must have the same size that their associated Acquire request"
     );
+
+    if (verbose)
+      $display("Server: %d ", index, fshow(slave.channelD.first));
 
     slave.channelD.deq();
     channelD <= slave.channelD.first;
@@ -110,6 +115,9 @@ module mkAcquireFSM
       !grantStarted && size == 1,
       "Grant burst must contain only one message, otherwise use GrantData"
     );
+
+    if (verbose)
+      $display("Server: ", fshow(slave.channelD.first));
 
     slave.channelD.deq();
     channelD <= slave.channelD.first;
@@ -170,7 +178,7 @@ module mkAcquireFSM
     endaction
   endmethod
 
-  method ActionValue#(PermTL) acquireAck
+  method ActionValue#(TLPerm) acquireAck
     if (started && valid && size == 0);
     grantStarted <= False;
     valid <= False;
@@ -248,7 +256,7 @@ module mkBurstFSM
     (OpcodeC opcode, Bit#(indexW) idx, Bit#(addrW) addr, Bit#(sizeW) logSize)
     if (started && !valid[1]);
     action
-      let msg = ChannelC{
+      ChannelC#(`TL_ARGS) msg = ChannelC{
         opcode: opcode,
         source: source,
         size: logSize,
@@ -268,8 +276,8 @@ module mkBurstFSM
       case (opcode) matches
         tagged ReleaseData .*  : size[1] <= 1 << logSize;
         tagged ProbeAckData .* : size[1] <= 1 << logSize;
-        tagged Release .*      : slave.channelC.enq(message);
-        tagged ProbeAck .*     : slave.channelC.enq(message);
+        tagged Release .*      : slave.channelC.enq(msg);
+        tagged ProbeAck .*     : slave.channelC.enq(msg);
       endcase
     endaction
   endmethod
@@ -279,7 +287,6 @@ module mkBurstFSM
     action
       valid[0] <= False;
 
-      $display("receive release ack");
       case (message.opcode) matches
         tagged ReleaseData .* : slave.channelD.deq;
         tagged Release     .* : slave.channelD.deq;
@@ -292,12 +299,13 @@ endmodule
 interface ReleaseFSM#(type indexT, `TL_ARGS_DECL);
   method Action setSource(Bit#(sourceW) source);
 
-  method ActionValue#(Tuple2#(Bit#(addrW), PermTL)) probeBlock;
-  method Action probeAck(Reduce reduce, indexT idx);
+  method ActionValue#(Tuple2#(Bit#(addrW), TLPerm)) probeStart;
+  method Action probeBlock(Reduce reduce, indexT idx);
+  method Action probePerms(Reduce reduce);
   method Action probeFinish();
 
-
   method Action releaseBlock(Reduce reduce, indexT index, Bit#(addrW) addr);
+  method Action releasePerms(Reduce reduce, Bit#(addrW) addr);
   method Action releaseAck();
 endinterface
 
@@ -332,7 +340,7 @@ module mkReleaseFSM
 
   Ehr#(2, ReleaseState) state <- mkEhr(INIT);
 
-  function ActionValue#(Tuple2#(Bit#(addrW), PermTL))
+  function ActionValue#(Tuple2#(Bit#(addrW), TLPerm))
     receiveProbe(Cap perm, Bool useData, ChannelB#(`TL_ARGS) msg);
     actionvalue
 
@@ -350,9 +358,12 @@ module mkReleaseFSM
     endactionvalue
   endfunction
 
-  method ActionValue#(Tuple2#(Bit#(addrW), PermTL)) probeBlock
+  method ActionValue#(Tuple2#(Bit#(addrW), TLPerm)) probeStart
     if (slave.channelB.first.source == source && state[1] == IDLE);
     let ret = ?;
+
+    if (verbose)
+      $display("Server: ", fshow(slave.channelB.first));
 
     case (slave.channelB.first.opcode) matches
       tagged ProbeBlock .p : ret <- receiveProbe(p, True, slave.channelB.first);
@@ -367,14 +378,20 @@ module mkReleaseFSM
     return ret;
   endmethod
 
-  method Action probeAck(Reduce reduce, Bit#(indexW) index)
+  method Action probeBlock(Reduce reduce, Bit#(indexW) index)
     if (state[1] == PROBE_WAIT);
     action
-      $display("send burst");
       state[1] <= PROBE_BURST;
-      OpcodeC opcode = (reduce == TtoN || reduce == TtoB) && needData ?
-        ProbeAckData(reduce) : ProbeAck(reduce);
-      burstM.startBurst(opcode, index, message.address, logSize);
+      doAssert(reduce != NtoN, "ProbeAckData an invalid data");
+      burstM.startBurst(ProbeAckData(reduce), index, message.address, logSize);
+    endaction
+  endmethod
+
+  method Action probePerms(Reduce reduce)
+    if (state[1] == PROBE_WAIT);
+    action
+      state[1] <= PROBE_BURST;
+      burstM.startBurst(ProbeAck(reduce), ?, message.address, logSize);
     endaction
   endmethod
 
@@ -382,7 +399,6 @@ module mkReleaseFSM
     if (state[0] == PROBE_BURST);
     action
       state[0] <= IDLE;
-      $display("finish burst");
       burstM.finishBurst();
     endaction
   endmethod
@@ -400,10 +416,15 @@ module mkReleaseFSM
     if (state[1] == IDLE);
     action
       state[1] <= RELEASE_BURST;
-      burstM.startBurst(
-        reduce == BtoN || reduce == NtoN ? Release(reduce) : ReleaseData(reduce),
-        index, addr, logSize
-      );
+      burstM.startBurst(ReleaseData(reduce), index, addr, logSize);
+    endaction
+  endmethod
+
+  method Action releasePerms(Reduce reduce, Bit#(addrW) addr)
+    if (state[1] == IDLE);
+    action
+      state[1] <= RELEASE_BURST;
+      burstM.startBurst(Release(reduce), ?, addr, logSize);
     endaction
   endmethod
 
@@ -420,12 +441,12 @@ interface TileLinkServerFSM#(type indexT, `TL_ARGS_DECL);
 
   method Action acquireBlock(Grow grow, indexT idx, Bit#(addrW) addr);
   method Action acquirePerms(Grow grow, Bit#(addrW) addr);
-  method ActionValue#(PermTL) acquireAck();
+  method ActionValue#(TLPerm) acquireAck();
 
   method Action releaseBlock(Reduce reduce, indexT idx, Bit#(addrW) addr);
   method Action releaseAck();
 
-  method ActionValue#(Tuple2#(Bit#(addrW), PermTL)) probeBlock;
+  method ActionValue#(Tuple2#(Bit#(addrW), TLPerm)) probeBlock;
   method Action probeAck(Reduce reduce, indexT idx);
   method Action probeFinish();
 endinterface

@@ -15,6 +15,7 @@ interface Bram#(type addrT, type dataT);
   method Action write(addrT addr, dataT data);
   method Action read(addrT addr);
   method dataT response;
+  method Bool canRead;
   method Bool canDeq;
   method Action deq;
 endinterface
@@ -59,6 +60,8 @@ module mkSizedBram#(Integer size) (Bram#(addrT, dataT))
     currentRdAddr.wset(addr);
   endmethod
 
+  method Bool canRead = rsp.notFull;
+
   method dataT response if (rsp.notEmpty);
     case (rsp.first) matches
       tagged Valid .data : return data;
@@ -87,6 +90,8 @@ module mkSizedBramGen
   method Action read(addrT addr) if (startIndex == Invalid);
     bram.read(addr);
   endmethod
+
+  method Bool canRead = startIndex == Invalid && bram.canRead;
 
   method dataT response if (startIndex == Invalid);
     return bram.response();
@@ -131,6 +136,7 @@ interface BramVec#(type addrT, numeric type n, type dataT);
   method Action write(addrT addr, Vector#(n, dataT) data, Bit#(n) mask);
   method Action read(addrT addr);
   method Vector#(n, dataT) response;
+  method Bool canRead;
   method Bool canDeq;
   method Action deq;
 endinterface
@@ -183,6 +189,8 @@ module mkSizedBramVec#(Integer size) (BramVec#(addrT, n, dataT))
     currentRdAddr.wset(addr);
   endmethod
 
+  method Bool canRead = rsp.notFull;
+
   method Vector#(n, dataT) response if (rsp.notEmpty);
     match {.data, .mask} = rsp.first;
     Vector#(n, dataT) ret = data;
@@ -215,6 +223,8 @@ module mkSizedBramGenVec
   method Action read(addrT addr) if (startIndex == Invalid);
     bram.read(addr);
   endmethod
+
+  method canRead = startIndex == Invalid && bram.canRead;
 
   method Vector#(n, dataT) response if (startIndex == Invalid);
     return bram.response();
@@ -264,6 +274,7 @@ interface BramBE#(type addrT, numeric type dataW);
   method Action write(addrT addr, Byte#(dataW) data, Bit#(dataW) mask);
   method Action read(addrT addr);
   method Byte#(dataW) response;
+  method Bool canRead;
   method Bool canDeq;
   method Action deq;
 endinterface
@@ -274,6 +285,7 @@ module mkSizedBramBE#(Integer size) (BramBE#(addrT, dataW))
 
   method canDeq = bram.canDeq;
   method response = pack(bram.response);
+  method canRead = bram.canRead;
   method read = bram.read;
   method deq = bram.deq;
 
@@ -291,6 +303,7 @@ module mkSizedBramGenBE
 
   method canDeq = bram.canDeq;
   method response = pack(bram.response);
+  method canRead = bram.canRead;
   method read = bram.read;
   method deq = bram.deq;
 
@@ -341,6 +354,8 @@ module mkVectorBram#(Bram#(addrT, dataT) bram) (Vector#(n, Bram#(addrT, dataT)))
         endaction
       endmethod
 
+      method canRead = bram.canRead;
+
       method dataT response() if (ehr[0] == fromInteger(i));
         return bram.response();
       endmethod
@@ -372,6 +387,8 @@ module mkVectorBramBE#(BramBE#(addrT, dataW) bram) (Vector#(n, BramBE#(addrT, da
           bram.read(addr);
         endaction
       endmethod
+
+      method canRead = bram.canRead;
 
       method Byte#(dataW) response() if (ehr[0] == fromInteger(i));
         return bram.response();
@@ -406,6 +423,8 @@ module mkVectorBramVec#(BramVec#(addrT, m, dataT) bram)
         endaction
       endmethod
 
+      method canRead = bram.canRead;
+
       method Vector#(m, dataT) response() if (ehr[0] == fromInteger(i));
         return bram.response();
       endmethod
@@ -425,6 +444,7 @@ endmodule
 
 module mkBramFromBramBE#(BramBE#(addrT, dataW) bram) (Bram#(addrT, Byte#(dataW)));
   method response = bram.response;
+  method canRead = bram.canRead;
   method canDeq = bram.canDeq;
   method read = bram.read;
   method deq = bram.deq;
@@ -436,6 +456,7 @@ endmodule
 module mkBramFromBramVec#(BramVec#(addrT, n, dataT) bram)
   (Bram#(addrT, Vector#(n, dataT)));
   method response = bram.response;
+  method canRead = bram.canRead;
   method canDeq = bram.canDeq;
   method read = bram.read;
   method deq = bram.deq;

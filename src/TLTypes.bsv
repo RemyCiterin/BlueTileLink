@@ -30,10 +30,10 @@ use to read or write data without caching.
 | ReleaseAck    | . | . | . | X | . |                         |
 +---------------+---+---+---+---+---+-------------------------+
 | GetFull       | X | . | . | . | . | AccessAckData           |
-| GetAckData    | . | . | . | X | . |                         |
+| AccessAckData | . | . | . | X | . |                         |
 +---------------+---+---+---+---+---+-------------------------+
 | PutData       | X | . | . | . | . | AccessAck               |
-| PutAck        | . | . | . | X | . |                         |
+| AccessAck     | . | . | . | X | . |                         |
 +---------------+---+---+---+---+---+-------------------------+
 */
 
@@ -145,8 +145,8 @@ typedef union tagged {
   Cap Grant;
   Cap GrantData;
   void ReleaseAck;
-  void PutAckData;
-  void PutAck;
+  void AccessAckData;
+  void AccessAck;
 } OpcodeD deriving(Bits, FShow, Eq);
 
 typedef enum {
@@ -160,6 +160,7 @@ typedef struct {
   Bit#(addrW) address;
   Bit#(dataW) mask;
   Byte#(dataW) data;
+  Bool last;
 } ChannelA#(`TL_ARGS_DECL) deriving(Bits, FShow, Eq);
 
 typedef struct {
@@ -175,6 +176,7 @@ typedef struct {
   Bit#(sourceW) source;
   Bit#(addrW) address;
   Byte#(dataW) data;
+  Bool last;
 } ChannelC#(`TL_ARGS_DECL) deriving(Bits, FShow, Eq);
 
 typedef struct {
@@ -183,6 +185,7 @@ typedef struct {
   Bit#(sourceW) source;
   Bit#(sinkW) sink;
   Byte#(dataW) data;
+  Bool last;
 } ChannelD#(`TL_ARGS_DECL) deriving(Bits, FShow, Eq);
 
 typedef struct {
@@ -224,31 +227,31 @@ instance Connectable#(TLMaster#(`TL_ARGS), TLSlave#(`TL_ARGS));
   endmodule
 endinstance
 
-function Bool hasDataA(ChannelA#(`TL_ARGS) msg);
-  return msg.opcode == PutData;
+function Bool hasDataA(OpcodeA opcode);
+  return opcode == PutData;
 endfunction
 
-function Bool hasDataB(ChannelB#(`TL_ARGS) msg);
+function Bool hasDataB(OpcodeB opcode);
   return False;
 endfunction
 
-function Bool hasDataC(ChannelC#(`TL_ARGS) msg);
-  return case (msg.opcode) matches
+function Bool hasDataC(OpcodeC opcode);
+  return case (opcode) matches
     tagged ProbeAckData .* : True;
     tagged ReleaseData .* : True;
     default: False;
   endcase;
 endfunction
 
-function Bool hasDataD(ChannelD#(`TL_ARGS) msg);
-  return case (msg.opcode) matches
+function Bool hasDataD(OpcodeD opcode);
+  return case (opcode) matches
     tagged GrantData .* : True;
-    PutAckData : True;
+    AccessAckData : True;
     default: False;
   endcase;
 endfunction
 
-function Bool hasDataE(ChannelE#(`TL_ARGS) msg);
+function Bool hasDataE(OpcodeE opcode);
   return False;
 endfunction
 
@@ -274,7 +277,7 @@ module mkVectorTLSlave#(TLSlave#(`TL_ARGS) slave) (Vector#(n, TLSlave#(`TL_ARGS)
           action
             Bool first = sizeA == 0;
             Bool last =
-              !hasDataA(msg) ||
+              !hasDataA(msg.opcode) ||
               sizeA == fromInteger(valueOf(dataW)) ||
               (sizeA == 0 && logDataW >= msg.size);
 
@@ -295,7 +298,7 @@ module mkVectorTLSlave#(TLSlave#(`TL_ARGS) slave) (Vector#(n, TLSlave#(`TL_ARGS)
           action
             Bool first = sizeC == 0;
             Bool last =
-              !hasDataC(msg) ||
+              !hasDataC(msg.opcode) ||
               sizeC == fromInteger(valueOf(dataW)) ||
               (sizeC == 0 && logDataW >= msg.size);
 

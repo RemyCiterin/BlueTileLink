@@ -9,6 +9,7 @@ import Utils :: *;
 
 import TLServer :: *;
 import TLClient :: *;
+import TLBram :: *;
 
 import TLTypes :: *;
 

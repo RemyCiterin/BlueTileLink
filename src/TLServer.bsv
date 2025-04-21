@@ -146,6 +146,7 @@ module mkAcquireFSM
         source: source,
         address: addr,
         size: logSize,
+        last: True,
         data: ?,
         mask: ?
       });
@@ -227,6 +228,7 @@ module mkBurstFSM
     bram.deq();
 
     ChannelC#(`TL_ARGS) msg = message;
+    msg.last = fromInteger(valueOf(dataW)) == size[0];
     msg.data = data;
 
     slave.channelC.enq(msg);
@@ -257,6 +259,7 @@ module mkBurstFSM
     if (started && !valid[1]);
     action
       ChannelC#(`TL_ARGS) msg = ChannelC{
+        last: !hasDataC(opcode) || logSize == fromInteger(valueOf(TLog#(dataW))),
         opcode: opcode,
         source: source,
         size: logSize,

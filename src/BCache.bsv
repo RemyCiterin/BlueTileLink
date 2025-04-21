@@ -103,6 +103,11 @@ module mkBCacheCore
 
   Bit#(sizeW) logSize = fromInteger(valueOf(offsetW) + valueOf(TLog#(dataW)));
 
+  Ehr#(2, Bit#(8)) reserved <- mkEhr(0);
+  rule decrement_reserved if (reserved[0] > 0);
+    reserved[0] <= reserved[0] - 1;
+  endrule
+
   let bram <- mkBramBE();
   Vector#(2, BramBE#(Bit#(TAdd#(indexW, offsetW)), dataW)) vbram
     <- mkVectorBramBE(bram);
@@ -164,7 +169,7 @@ module mkBCacheCore
     endcase
   endrule
 
-  rule receiveProbe if (state[1] == Idle || state[1] == Acquire);
+  rule receiveProbe if (state[1] == Idle || state[1] == Acquire && reserved[1] == 0);
     match {.addr, .perm} <- releaseM.probeStart();
 
     match {.tag, .idx, .off} = conf.decode(addr);

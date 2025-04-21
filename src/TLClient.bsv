@@ -118,6 +118,108 @@ module mkAcquireBuffer#(Bit#(sizeW) logSize) (AcquireBuffer#(`TL_ARGS));
   endmethod
 endmodule
 
+interface ProbeFSM#(numeric type nSource, `TL_ARGS_DECL);
+  // Start a probe sequence with all the sources indicated by the mask
+  method Action start(Bit#(nSource) mask, OpcodeB opcode, Bit#(addrW) addr);
+
+  method ActionValue#(Byte#(dataW)) deq;
+  method Action finish();
+  method Bool exclusive;
+endinterface
+
+module mkProbeFSM#(
+    Bit#(sinkW) sink,
+    Bit#(sizeW) logSize,
+    TLMaster#(`TL_ARGS) master,
+    Bram#(Bit#(addrW), Byte#(dataW)) bram,
+    Vector#(nSource, Bit#(sourceW)) sources
+  ) (ProbeFSM#(nSource, `TL_ARGS))
+  provisos (Alias#(Bit#(TAdd#(1, TLog#(nSource))), sourceIdx));
+
+  Reg#(Bool) busy <- mkReg(False);
+
+  sourceIdx numSource = fromInteger(valueOf(nSource));
+  Reg#(Bit#(nSource)) probeMask <- mkReg(?);
+  Reg#(Bit#(addrW)) acquireAddr <- mkReg(?);
+  Reg#(sourceIdx) probeNext <- mkReg(?);
+  Reg#(OpcodeB) opcode <- mkReg(?);
+  Reg#(Bool) exc <- mkReg(?);
+
+  Reg#(Bit#(addrW)) probeAddr <- mkReg(0);
+  Reg#(Bit#(addrW)) probeSize <- mkReg(0);
+
+  rule sendProbe if (busy && probeNext < numSource);
+    let source = sources[probeNext];
+
+    if (probeMask[source] == 1)
+      master.channelB.enq(ChannelB{
+        address: acquireAddr,
+        source: source,
+        opcode: opcode,
+        size: logSize
+      });
+
+    probeNext <= probeNext + 1;
+  endrule
+
+  rule receiveProbeAck
+    if (busy &&& master.channelC.first.opcode matches tagged ProbeAck .reduce);
+    let msg = master.channelC.first;
+
+    if (verbose) $display("Client: ", fshow(msg));
+
+    master.channelC.deq;
+    doAssert(probeMask[msg.source] == 1, "Receive more ProbeAck than expected");
+
+    if (reduceTo(reduce) != N) exc <= False;
+
+    probeMask[msg.source] <= 0;
+  endrule
+
+  method ActionValue#(Byte#(dataW)) deq
+    if (busy &&& master.channelC.first.opcode matches tagged ProbeAckData .reduce);
+    let msg = master.channelC.first;
+
+    if (verbose) $display("Client: ", fshow(msg));
+
+    doAssert(msg.size == logSize, "Receive ProbeAckData of an incorrcet size");
+    Bit#(addrW) addr = probeSize != 0 ? probeAddr : acquireAddr;
+    Bit#(addrW) size = probeSize != 0 ? probeSize : 1 << logSize;
+    Bool first = size != 0;
+
+    master.channelC.deq;
+    if (reduceTo(reduce) != N) exc <= False;
+
+    doAssert(probeMask[msg.source] == 1, "Receive more ProbeAckData than expected");
+
+    probeSize <= size - fromInteger(valueOf(dataW));
+    probeAddr <= addr + fromInteger(valueOf(dataW));
+    Bool last = size == fromInteger(valueOf(dataW));
+
+    if (last) begin
+      probeMask[msg.source] <= 0;
+    end
+
+    return msg.data;
+  endmethod
+
+  method Action start(Bit#(nSource) mask, OpcodeB op, Bit#(addrW) a);
+    probeMask <= mask;
+    probeAddr <= a;
+    probeNext <= 0;
+    busy <= True;
+    opcode <= op;
+    exc <= True;
+  endmethod
+
+  method exclusive = exc;
+
+  method Action finish() if (probeMask == 0);
+    action
+      busy <= False;
+    endaction
+  endmethod
+endmodule
 
 module mkTileLinkClientFSM#(
     Bit#(sinkW) sink,
@@ -173,8 +275,8 @@ module mkTileLinkClientFSM#(
 
   rule receiveChannelA if (state == IDLE);
     channelA <= master.channelA.first;
+    probeCount <= numSource - 1;
     grantSize <= 1 << logSize;
-    probeCount <= numSource;
     master.channelA.deq;
     state <= PROBE_WAIT;
     exclusive <= True;
@@ -195,12 +297,13 @@ module mkTileLinkClientFSM#(
     Cap cap = permChannelA(channelA.opcode) == T ? N : B;
 
     let source = sources[probeNext];
-    master.channelB.enq(ChannelB{
-      address: channelA.address,
-      opcode: ProbeBlock(cap),
-      size: channelA.size,
-      source: source
-    });
+    if (source != channelA.source)
+      master.channelB.enq(ChannelB{
+        address: channelA.address,
+        opcode: ProbeBlock(cap),
+        size: channelA.size,
+        source: source
+      });
 
     probeNext <= probeNext + 1;
   endrule
@@ -229,19 +332,21 @@ module mkTileLinkClientFSM#(
       master.channelC.first.opcode matches tagged ProbeAckData .reduce
     );
 
-    if (verbose)
-      $display("Client: ", fshow(master.channelC.first));
+    let msg = master.channelC.first;
 
-    doAssert(master.channelC.first.size == logSize, "Receive ProbeAckData of an incorrcet size");
+    if (verbose)
+      $display("Client: ", fshow(msg));
+
+    doAssert(msg.size == logSize, "Receive ProbeAckData of an incorrcet size");
     Bit#(addrW) size = state == PROBE_BURST ? probeSize : 1 << channelA.size;
     Bit#(addrW) addr = state == PROBE_BURST ? probeAddr : channelA.address;
     Bool first = state != PROBE_BURST;
 
-    bram.write(addr >> logDataW, master.channelC.first.data);
-    buffer.enqProbe(master.channelC.first.data);
+    bram.write(addr >> logDataW, msg.data);
+    buffer.enqProbe(msg.data);
 
     master.channelC.deq;
-    if (reduceTo(reduce) != N && master.channelC.first.source != channelA.source)
+    if (reduceTo(reduce) != N && msg.source != channelA.source)
       exclusive <= False;
 
     doAssert(probeCount != 0, "Receive more ProbeAckData than expected");
@@ -278,15 +383,18 @@ module mkTileLinkClientFSM#(
   rule sendGrant if (state == GRANT_BURST);
     let data <- buffer.deq;
 
+    Bool last = grantSize == fromInteger(valueOf(dataW));
+
     master.channelD.enq(ChannelD{
       opcode: GrantData(exclusive ? T : B),
       source: channelA.source,
       size: channelA.size,
+      last: last,
       sink: sink,
       data: data
     });
 
-    if (grantSize == fromInteger(valueOf(dataW))) begin
+    if (last) begin
       state <= GRANT_WAIT;
     end
 
@@ -313,6 +421,7 @@ module mkTileLinkClientFSM#(
       opcode: ReleaseAck,
       source: msg.source,
       size: msg.size,
+      last: True,
       sink: sink,
       data: ?
     });
@@ -342,6 +451,7 @@ module mkTileLinkClientFSM#(
         opcode: ReleaseAck,
         source: msg.source,
         size: msg.size,
+        last: True,
         sink: sink,
         data: ?
       });

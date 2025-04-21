@@ -57,7 +57,7 @@ module mkCPU_SIM(Empty);
     interface channelE = toFifoO(channelE);
   endinterface;
 
-  Bram#(Bit#(32), Bit#(32)) rom <- mkSizedBramInit(4096, 0);
+  BramBE#(Bit#(32), 4) rom <- mkSizedBramInitBE(4096, 0);
 
   Bit#(sizeW) logSize = 6;
 
@@ -75,7 +75,9 @@ module mkCPU_SIM(Empty);
     caches <- mapM(mkBCacheCore(BCacheConf{encode: encode, decode: decode}), slaves);
 
   Vector#(NCache, Bit#(SourceW)) sources = Vector::genWith(fromInteger);
-  mkTileLinkClientFSM(0, logSize, master, rom, sources);
+
+  let rom_controller <- mkTLBram(rom);
+  mkTileLinkClientFSM(0, logSize, master, rom_controller, sources);
 
   Vector#(NCache, Reg#(Bit#(32))) response <- replicateM(mkReg(0));
 

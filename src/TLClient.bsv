@@ -10,6 +10,8 @@ import Ehr :: *;
 
 `include "TL.defines"
 
+export mkTileLinkClientFSM;
+
 Bool verbose = False;
 
 typedef enum {
@@ -221,13 +223,16 @@ module mkProbeFSM#(
   endmethod
 endmodule
 
+// A TileLink snoop controller
 module mkTileLinkClientFSM#(
     Bit#(sinkW) sink,
     Bit#(sizeW) logSize,
     TLMaster#(`TL_ARGS) master,
-    Bram#(Bit#(addrW), Byte#(dataW)) bram,
+    TLSlave#(addrW, dataW, sizeW, sinkW, 0) slave,
     Vector#(nSource, Bit#(sourceW)) sources
   ) (Empty) provisos (Alias#(Bit#(TAdd#(1, TLog#(nSource))), sourceIdx));
+
+  Reg#(Bool) waitAccessAck <- mkReg(False);
 
   Bit#(sizeW) logDataW = fromInteger(valueOf(TLog#(dataW)));
 
@@ -273,7 +278,7 @@ module mkTileLinkClientFSM#(
   Ehr#(2, Bit#(addrW)) fillSize <- mkEhr(0);
   Ehr#(2, Bool) needFill <- mkEhr(False);
 
-  rule receiveChannelA if (state == IDLE);
+  rule receiveChannelA if (state == IDLE && !waitAccessAck);
     channelA <= master.channelA.first;
     probeCount <= numSource - 1;
     grantSize <= 1 << logSize;
@@ -289,6 +294,15 @@ module mkTileLinkClientFSM#(
     fillAddr[0] <= master.channelA.first.address;
     fillSize[0] <= 1 << logSize;
     needFill[0] <= True;
+
+    slave.channelA.enq(ChannelA{
+      address: master.channelA.first.address,
+      opcode: GetFull,
+      size: logSize,
+      source: sink,
+      mask: ?,
+      data: ?
+    });
 
     doAssert(master.channelA.first.size == logSize, "Invalid channel A request size");
   endrule
@@ -329,7 +343,8 @@ module mkTileLinkClientFSM#(
 
   rule receiveProbeAckData if (
       (state == PROBE_WAIT || state == PROBE_BURST) &&&
-      master.channelC.first.opcode matches tagged ProbeAckData .reduce
+      master.channelC.first.opcode matches tagged ProbeAckData .reduce &&&
+      (!waitAccessAck || state == PROBE_BURST)
     );
 
     let msg = master.channelC.first;
@@ -342,7 +357,15 @@ module mkTileLinkClientFSM#(
     Bit#(addrW) addr = state == PROBE_BURST ? probeAddr : channelA.address;
     Bool first = state != PROBE_BURST;
 
-    bram.write(addr >> logDataW, msg.data);
+    if (first) waitAccessAck <= True;
+    slave.channelA.enq(ChannelA{
+      address: msg.address,
+      opcode: PutData,
+      data: msg.data,
+      size: logSize,
+      source: sink,
+      mask: -1
+    });
     buffer.enqProbe(msg.data);
 
     master.channelC.deq;
@@ -363,14 +386,15 @@ module mkTileLinkClientFSM#(
     end
   endrule
 
-  rule rrequestRam if (needFill[1] && fillSize[1] > 0);
-    bram.read(fillAddr[1] >> logDataW);
-  endrule
-
-  (* preempts = "receiveProbeAckData,rresponseRam" *)
-  rule rresponseRam if (needFill[0] && fillSize[0] > 0);
-    bram.deq;
-    buffer.enqMem(bram.response);
+  (* preempts = "receiveProbeAckData,rresponseMEM" *)
+  rule rresponseMEM
+    if (
+      needFill[0] && fillSize[0] > 0 &&
+      slave.channelD.first.source == sink &&
+      slave.channelD.first.opcode == AccessAckData
+    );
+    buffer.enqMem(slave.channelD.first.data);
+    slave.channelD.deq;
 
     fillSize[0] <= fillSize[0] - fromInteger(valueOf(dataW));
     fillAddr[0] <= fillAddr[0] + fromInteger(valueOf(dataW));
@@ -389,7 +413,6 @@ module mkTileLinkClientFSM#(
       opcode: GrantData(exclusive ? T : B),
       source: channelA.source,
       size: channelA.size,
-      last: last,
       sink: sink,
       data: data
     });
@@ -421,7 +444,6 @@ module mkTileLinkClientFSM#(
       opcode: ReleaseAck,
       source: msg.source,
       size: msg.size,
-      last: True,
       sink: sink,
       data: ?
     });
@@ -429,7 +451,8 @@ module mkTileLinkClientFSM#(
 
   rule receiveReleaseData if (
       (state == IDLE || state == PROBE_WAIT || state == RELEASE_BURST) &&&
-      master.channelC.first.opcode matches tagged ReleaseData .*
+      master.channelC.first.opcode matches tagged ReleaseData .* &&&
+      (!waitAccessAck || state == RELEASE_BURST)
     );
 
     master.channelC.deq;
@@ -440,7 +463,15 @@ module mkTileLinkClientFSM#(
 
     doAssert(msg.size == logSize, "Invalid channel C request size");
 
-    bram.write(addr >> logDataW, msg.data);
+    if (first) waitAccessAck <= True;
+    slave.channelA.enq(ChannelA{
+      opcode: PutData,
+      data: msg.data,
+      address: addr,
+      size: logSize,
+      source: sink,
+      mask: -1
+    });
 
     releaseAddr <= addr + fromInteger(valueOf(dataW));
     releaseSize <= size - fromInteger(valueOf(dataW));
@@ -451,7 +482,6 @@ module mkTileLinkClientFSM#(
         opcode: ReleaseAck,
         source: msg.source,
         size: msg.size,
-        last: True,
         sink: sink,
         data: ?
       });
@@ -463,5 +493,15 @@ module mkTileLinkClientFSM#(
     end else if (last && !first) begin
       state <= nextState;
     end
+  endrule
+
+  rule sendReleaseAck if (
+      slave.channelD.first.source == sink &&
+      slave.channelD.first.opcode == AccessAck &&
+      waitAccessAck
+    );
+
+    slave.channelD.deq;
+    waitAccessAck <= False;
   endrule
 endmodule

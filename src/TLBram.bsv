@@ -13,16 +13,16 @@ typedef enum {
   Idle, Read, Write
 } TLBramState deriving(Bits, FShow, Eq);
 
-module mkTLBram#(Bit#(sinkW) sink, BramBE#(Bit#(addrW), dataW) bram) (TLSlave#(`TL_ARGS));
+module mkTLBram#(BramBE#(Bit#(addrW), dataW) bram) (TLSlave#(`TL_ARGS));
   Bit#(sizeW) logDataW = fromInteger(valueOf(TLog#(dataW)));
-  Bit#(addrW) beatLen = fromInteger(valueOf(dataW));
+  Bit#(addrW) laneSize = fromInteger(valueOf(dataW));
 
   Fifo#(2, ChannelA#(`TL_ARGS)) fifoA <- mkFifo;
   Fifo#(2, ChannelD#(`TL_ARGS)) fifoD <- mkFifo;
   let message = fifoA.first;
 
-  Ehr#(2, Bit#(addrW)) sizeReg <- mkEhr(?);
-  Ehr#(2, Bit#(addrW)) addrReg <- mkEhr(?);
+  Ehr#(2, Bit#(addrW)) sizeReg <- mkEhr(0);
+  Ehr#(2, Bit#(addrW)) addrReg <- mkEhr(0);
 
   Ehr#(2, TLBramState) state <- mkEhr(Idle);
 
@@ -32,21 +32,21 @@ module mkTLBram#(Bit#(sinkW) sink, BramBE#(Bit#(addrW), dataW) bram) (TLSlave#(`
     Bool first = sizeReg[0] == 0;
     Bit#(addrW) size = first ? (1 << message.size) : sizeReg[0];
     Bit#(addrW) addr = first ? message.address : addrReg[0];
+    Bool last = laneSize >= size;
 
     bram.write(addr >> logDataW, message.data, message.mask);
 
     fifoA.deq;
-    state[0] <= message.last ? Idle : Write;
-    sizeReg[0] <= message.last ? 0 : size - beatLen;
-    addrReg[0] <= addr + beatLen;
+    state[0] <= last ? Idle : Write;
+    sizeReg[0] <= last ? 0 : size - laneSize;
+    addrReg[0] <= addr + laneSize;
 
-    if (message.last) begin
+    if (last) begin
       fifoD.enq(ChannelD{
         source: message.source,
         size: message.size,
         opcode: AccessAck,
-        last: True,
-        sink: sink,
+        sink: ?,
         data: ?
       });
     end
@@ -65,23 +65,22 @@ module mkTLBram#(Bit#(sinkW) sink, BramBE#(Bit#(addrW), dataW) bram) (TLSlave#(`
     Bool first = sizeReg[0] == 0;
     Bit#(addrW) size = first ? (1 << message.size) : sizeReg[0];
     Bit#(addrW) addr = first ? message.address : addrReg[0];
-    Bool last = beatLen >= size;
+    Bool last = laneSize >= size;
 
     fifoD.enq(ChannelD{
       source: message.source,
       opcode: AccessAckData,
       data: bram.response,
       size: message.size,
-      last: last,
-      sink: sink
+      sink: ?
     });
 
     bram.deq;
     if (last) fifoA.deq;
 
     state[0] <= last ? Idle : Read;
-    sizeReg[0] <= last ? 0 : size - beatLen;
-    addrReg[0] <= addr + beatLen;
+    sizeReg[0] <= last ? 0 : size - laneSize;
+    addrReg[0] <= addr + laneSize;
   endrule
 
   interface channelA = toFifoI(fifoA);

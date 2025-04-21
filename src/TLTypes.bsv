@@ -160,7 +160,6 @@ typedef struct {
   Bit#(addrW) address;
   Bit#(dataW) mask;
   Byte#(dataW) data;
-  Bool last;
 } ChannelA#(`TL_ARGS_DECL) deriving(Bits, FShow, Eq);
 
 typedef struct {
@@ -176,7 +175,6 @@ typedef struct {
   Bit#(sourceW) source;
   Bit#(addrW) address;
   Byte#(dataW) data;
-  Bool last;
 } ChannelC#(`TL_ARGS_DECL) deriving(Bits, FShow, Eq);
 
 typedef struct {
@@ -185,7 +183,6 @@ typedef struct {
   Bit#(sourceW) source;
   Bit#(sinkW) sink;
   Byte#(dataW) data;
-  Bool last;
 } ChannelD#(`TL_ARGS_DECL) deriving(Bits, FShow, Eq);
 
 typedef struct {

@@ -148,7 +148,7 @@ module mkProbeFSM#(
   Reg#(Bool) exc <- mkReg(?);
 
   Reg#(Bit#(addrW)) probeAddr <- mkReg(0);
-  Reg#(Bit#(addrW)) probeSize <- mkReg(0);
+  Reg#(TLSize) probeSize <- mkReg(0);
 
   rule sendProbe if (busy && probeNext < numSource);
     let source = sources[probeNext];
@@ -186,7 +186,7 @@ module mkProbeFSM#(
 
     doAssert(msg.size == logSize, "Receive ProbeAckData of an incorrcet size");
     Bit#(addrW) addr = probeSize != 0 ? probeAddr : acquireAddr;
-    Bit#(addrW) size = probeSize != 0 ? probeSize : 1 << logSize;
+    TLSize size = probeSize != 0 ? probeSize : 1 << logSize;
     Bool first = size != 0;
 
     master.channelC.deq;
@@ -244,10 +244,6 @@ module mkTileLinkClientFSM#(
 
   AcquireBuffer#(`TL_ARGS) buffer <- mkAcquireBuffer(logSize);
 
-  function Bit#(addrW) bufIndex(Bit#(addrW) size);
-    return (size >> logDataW);
-  endfunction
-
   function Action startGrant();
     action
       state <= case (channelA.opcode) matches
@@ -260,15 +256,15 @@ module mkTileLinkClientFSM#(
   endfunction
 
   // Release state
-  Reg#(Bit#(addrW)) releaseSize <- mkReg(0);
+  Reg#(TLSize) releaseSize <- mkReg(0);
   Reg#(Bit#(addrW)) releaseAddr <- mkReg(0);
 
   // Probe state
   sourceIdx numSource = fromInteger(valueOf(nSource));
   Reg#(Bit#(addrW)) probeAddr <- mkReg(0);
-  Reg#(Bit#(addrW)) probeSize <- mkReg(0);
   Reg#(sourceIdx) probeCount <- mkReg(?);
   Reg#(sourceIdx) probeNext <- mkReg(?);
+  Reg#(TLSize) probeSize <- mkReg(0);
   Reg#(Bool) exclusive <- mkReg(?);
 
   // Grant state
@@ -279,11 +275,11 @@ module mkTileLinkClientFSM#(
   Ehr#(2, Bool) needFill <- mkEhr(False);
 
   rule receiveChannelA if (state == IDLE && !waitAccessAck);
+    state <= 1 >= numSource ? GRANT_BURST : PROBE_WAIT;
     channelA <= master.channelA.first;
     probeCount <= numSource - 1;
     grantSize <= 1 << logSize;
     master.channelA.deq;
-    state <= PROBE_WAIT;
     exclusive <= True;
     probeNext <= 0;
 
@@ -353,7 +349,7 @@ module mkTileLinkClientFSM#(
       $display("Client: ", fshow(msg));
 
     doAssert(msg.size == logSize, "Receive ProbeAckData of an incorrcet size");
-    Bit#(addrW) size = state == PROBE_BURST ? probeSize : 1 << channelA.size;
+    TLSize size = state == PROBE_BURST ? probeSize : 1 << channelA.size;
     Bit#(addrW) addr = state == PROBE_BURST ? probeAddr : channelA.address;
     Bool first = state != PROBE_BURST;
 
@@ -457,7 +453,7 @@ module mkTileLinkClientFSM#(
 
     master.channelC.deq;
     let msg = master.channelC.first;
-    Bit#(addrW) size = state == RELEASE_BURST ? releaseSize : 1 << msg.size;
+    TLSize size = state == RELEASE_BURST ? releaseSize : 1 << msg.size;
     Bit#(addrW) addr = state == RELEASE_BURST ? releaseAddr : msg.address;
     Bool first = state != RELEASE_BURST;
 

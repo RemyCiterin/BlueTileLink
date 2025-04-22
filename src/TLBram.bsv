@@ -9,39 +9,79 @@ export mkTLBram;
 
 `include "TL.defines"
 
-typedef enum {
-  Idle, Read, Write
-} TLBramState deriving(Bits, FShow, Eq);
+typedef enum {Idle, Write, Read} TLBramState deriving(Bits, FShow, Eq);
 
-module mkTLBram#(BramBE#(Bit#(addrW), dataW) bram) (TLSlave#(`TL_ARGS));
-  Bit#(sizeW) logDataW = fromInteger(valueOf(TLog#(dataW)));
-  Bit#(addrW) laneSize = fromInteger(valueOf(dataW));
+module mkTLBram#(
+    BramBE#(Bit#(addrW), dataW) bram
+  ) (TLSlave#(`TL_ARGS));
 
   Fifo#(2, ChannelA#(`TL_ARGS)) fifoA <- mkFifo;
   Fifo#(2, ChannelD#(`TL_ARGS)) fifoD <- mkFifo;
-  let message = fifoA.first;
 
-  Ehr#(2, Bit#(addrW)) sizeReg <- mkEhr(0);
+  TLMaster#(`TL_ARGS) master = interface TLMaster;
+    interface channelA = toFifoO(fifoA);
+    interface channelB = nullFifoI;
+    interface channelC = nullFifoO;
+    interface channelD = toFifoI(fifoD);
+    interface channelE = nullFifoO;
+  endinterface;
+
+  MetaChannelA#(`TL_ARGS) metaA <- mkMetaChannelA(master.channelA);
+  let message = metaA.channel.first;
+
+  Bit#(sizeW) logDataW = fromInteger(valueOf(TLog#(dataW)));
+  Integer laneSize = valueOf(dataW);
+
+  Reg#(Bit#(sourceW)) msgSource <- mkReg(?);
+  Reg#(Bit#(sizeW)) msgSize <- mkReg(?);
+
+  Ehr#(2, TLSize) sizeReg <- mkEhr(0);
   Ehr#(2, Bit#(addrW)) addrReg <- mkEhr(0);
 
   Ehr#(2, TLBramState) state <- mkEhr(Idle);
 
+  rule readBram if (state[1] == Read);
+    bram.read(addrReg[1] >> logDataW);
+  endrule
+
+  rule startGetFull if (message.opcode == GetFull && state[0] == Idle);
+    sizeReg[0] <= 1 << message.size;
+    addrReg[0] <= message.address;
+    msgSource <= message.source;
+    msgSize <= message.size;
+    metaA.channel.deq;
+    state[0] <= Read;
+  endrule
+
+  rule bramResponse if (state[0] == Read);
+    Bit#(addrW) addr = addrReg[0];
+    TLSize size = sizeReg[0];
+
+    Bool last = fromInteger(laneSize) >= size;
+
+    fifoD.enq(ChannelD{
+      opcode: AccessAckData,
+      data: bram.response,
+      source: msgSource,
+      size: msgSize,
+      sink: ?
+    });
+
+    bram.deq;
+
+    state[0] <= last ? Idle : Read;
+    sizeReg[0] <= size - fromInteger(laneSize);
+    addrReg[0] <= addr + fromInteger(laneSize);
+  endrule
+
   rule receivePutData
-    if (message.opcode == PutData);
+    if (message.opcode == PutData && state[0] != Read);
 
-    Bool first = sizeReg[0] == 0;
-    Bit#(addrW) size = first ? (1 << message.size) : sizeReg[0];
-    Bit#(addrW) addr = first ? message.address : addrReg[0];
-    Bool last = laneSize >= size;
+    bram.write(metaA.address >> logDataW, message.data, message.mask);
+    metaA.channel.deq;
 
-    bram.write(addr >> logDataW, message.data, message.mask);
-
-    fifoA.deq;
-    state[0] <= last ? Idle : Write;
-    sizeReg[0] <= last ? 0 : size - laneSize;
-    addrReg[0] <= addr + laneSize;
-
-    if (last) begin
+    state[0] <= metaA.last ? Idle : Write;
+    if (metaA.last) begin
       fifoD.enq(ChannelD{
         source: message.source,
         size: message.size,
@@ -50,37 +90,6 @@ module mkTLBram#(BramBE#(Bit#(addrW), dataW) bram) (TLSlave#(`TL_ARGS));
         data: ?
       });
     end
-  endrule
-
-  rule readBram
-    if (state[1] == Read);
-    bram.read(addrReg[1] >> logDataW);
-  endrule
-
-  rule startGetFull if (message.opcode == GetFull && state[0] == Idle);
-    state[0] <= Read;
-  endrule
-
-  rule bramResponse if (state[0] == Read);
-    Bool first = sizeReg[0] == 0;
-    Bit#(addrW) size = first ? (1 << message.size) : sizeReg[0];
-    Bit#(addrW) addr = first ? message.address : addrReg[0];
-    Bool last = laneSize >= size;
-
-    fifoD.enq(ChannelD{
-      source: message.source,
-      opcode: AccessAckData,
-      data: bram.response,
-      size: message.size,
-      sink: ?
-    });
-
-    bram.deq;
-    if (last) fifoA.deq;
-
-    state[0] <= last ? Idle : Read;
-    sizeReg[0] <= last ? 0 : size - laneSize;
-    addrReg[0] <= addr + laneSize;
   endrule
 
   interface channelA = toFifoI(fifoA);

@@ -71,7 +71,7 @@ module mkCPU_SIM(Empty);
     tuple3(addr[31:12], addr[11:6], addr[5:2]);
 
   Integer nCache = valueOf(NCache);
-  Vector#(NCache, BCacheCore#(Bit#(20), Bit#(6), Bit#(4), AddrW, DataW, SizeW, SourceW, SinkW))
+  Vector#(NCache, BCacheCore#(Bit#(1), Bit#(20), Bit#(6), Bit#(4), AddrW, DataW, SizeW, SourceW, SinkW))
     caches <- mapM(mkBCacheCore(BCacheConf{encode: encode, decode: decode}), slaves);
 
   Vector#(NCache, Bit#(SourceW)) sources = Vector::genWith(fromInteger);
@@ -81,8 +81,8 @@ module mkCPU_SIM(Empty);
 
   Vector#(NCache, Reg#(Bit#(32))) response <- replicateM(mkReg(0));
 
-  Vector#(NCache, Action) read = ?;
   Vector#(NCache, Stmt) lock = ?;
+  Vector#(NCache, Action) read = ?;
   Vector#(NCache, Stmt) unlock = ?;
   Vector#(NCache, Stmt) increment = ?;
   for (Integer i=0; i < nCache; i = i + 1) begin
@@ -153,7 +153,7 @@ module mkCPU_SIM(Empty);
             doAssert(counter == response[i], "ERROR!");
             counter <= counter + 1;
             unlock[i];
-            delay(100);
+            //delay(100);
           endseq
         endseq
       endpar

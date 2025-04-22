@@ -81,6 +81,13 @@ function Bool hasWritePerm(TLPerm perm);
   return perm > T;
 endfunction
 
+
+// Maximum possible size of a TileLink request (equal to one page)
+Integer maxLogSize = 12;
+Integer maxSize = 4096;
+
+typedef Bit#(13) TLSize;
+
 // Used by a cache block to acquire new permissions over a cache block
 typedef enum {
   NtoB = 0,
@@ -352,3 +359,189 @@ function TLPerm permChannelA(OpcodeA opcode);
     GetFull : B;
   endcase;
 endfunction
+
+// Give burst informations about a received ChannelA message
+interface MetaChannelA#(`TL_ARGS_DECL);
+  interface FifoO#(ChannelA#(`TL_ARGS)) channel;
+
+  // Give the address of the current beat
+  method Bit#(addrW) address;
+
+  // Give the address of the next beat if it exist
+  method Bit#(addrW) nextAddress;
+
+  // Return the size of the message from the current beat to it's last beat
+  method TLSize size;
+
+  // Return the size of the message from the next beat to it's last beat
+  method TLSize nextSize;
+
+  // Return if the current beat is the last of the message
+  method Bool last;
+
+  // Return if the current beat is the first of the message
+  method Bool first;
+endinterface
+
+module mkMetaChannelA#(FifoO#(ChannelA#(`TL_ARGS)) master) (MetaChannelA#(`TL_ARGS));
+  Bit#(sizeW) dataLogSize = fromInteger(valueOf(TLog#(dataW)));
+  TLSize dataSize = fromInteger(valueOf(dataW));
+
+  OpcodeA opcode = master.first.opcode;
+
+  Reg#(Bit#(addrW)) addrReg <- mkReg(?);
+  Reg#(TLSize) sizeReg <- mkReg(?);
+  Reg#(Bool) isFirst <- mkReg(True);
+
+  Bit#(addrW) addr = isFirst ? master.first.address : addrReg;
+  TLSize sz = isFirst ? 1 << master.first.size : sizeReg;
+
+  Bool isLast =
+    dataSize >= sz || !hasDataA(opcode);
+
+  interface FifoO channel;
+    method first = master.first;
+    method canDeq = master.canDeq;
+
+    method Action deq;
+      action
+        master.deq;
+        isFirst <= isLast;
+        addrReg <= addr + fromInteger(valueOf(dataW));
+        sizeReg <= sz - dataSize;
+      endaction
+    endmethod
+  endinterface
+
+  method address = when(master.canDeq, addr);
+
+  method nextAddress = when(master.canDeq, addr + fromInteger(valueOf(dataW)));
+
+  method size = when(master.canDeq, sz);
+
+  method nextSize = when(master.canDeq, isLast ? 0 : sz - dataSize);
+
+  method first = when(master.canDeq, isFirst);
+
+  method last = when(master.canDeq, isLast);
+endmodule
+
+// Give burst informations about a received ChannelC message
+interface MetaChannelC#(`TL_ARGS_DECL);
+  interface FifoO#(ChannelC#(`TL_ARGS)) channel;
+
+  // Give the address of the current beat
+  method Bit#(addrW) address;
+
+  // Give the address of the next beat if it exist
+  method Bit#(addrW) nextAddress;
+
+  // Return the size of the message from the current beat to it's last beat
+  method TLSize size;
+
+  // Return the size of the message from the next beat to it's last beat
+  method TLSize nextSize;
+
+  // Return if the current beat is the last of the message
+  method Bool last;
+
+  // Return if the current beat is the first of the message
+  method Bool first;
+endinterface
+
+module mkMetaChannelC#(FifoO#(ChannelC#(`TL_ARGS)) master) (MetaChannelC#(`TL_ARGS));
+  Bit#(sizeW) dataLogSize = fromInteger(valueOf(TLog#(dataW)));
+  TLSize dataSize = fromInteger(valueOf(dataW));
+
+  OpcodeC opcode = master.first.opcode;
+
+  Reg#(Bit#(addrW)) addrReg <- mkReg(?);
+  Reg#(TLSize) sizeReg <- mkReg(?);
+  Reg#(Bool) isFirst <- mkReg(True);
+
+  Bit#(addrW) addr = isFirst ? master.first.address : addrReg;
+  TLSize sz = isFirst ? 1 << master.first.size : sizeReg;
+
+  Bool isLast =
+    dataSize >= sz || !hasDataC(opcode);
+
+  interface FifoO channel;
+    method first = master.first;
+    method canDeq = master.canDeq;
+
+    method Action deq;
+      action
+        master.deq;
+        isFirst <= isLast;
+        addrReg <= addr + fromInteger(valueOf(dataW));
+        sizeReg <= sz - dataSize;
+      endaction
+    endmethod
+  endinterface
+
+  method address = when(master.canDeq, addr);
+
+  method nextAddress = when(master.canDeq, addr + fromInteger(valueOf(dataW)));
+
+  method size = when(master.canDeq, sz);
+
+  method nextSize = when(master.canDeq, isLast ? 0 : sz - dataSize);
+
+  method first = when(master.canDeq, isFirst);
+
+  method last = when(master.canDeq, isLast);
+endmodule
+
+
+// Give burst informations about a received ChannelD message
+interface MetaChannelD#(`TL_ARGS_DECL);
+  interface FifoO#(ChannelD#(`TL_ARGS)) channel;
+
+  // Return the size of the message from the current beat to it's last beat
+  method TLSize size;
+
+  // Return the size of the message from the next beat to it's last beat
+  method TLSize nextSize;
+
+  // Return if the current beat is the last of the message
+  method Bool last;
+
+  // Return if the current beat is the first of the message
+  method Bool first;
+endinterface
+
+module mkMetaChannelD#(FifoO#(ChannelD#(`TL_ARGS)) master) (MetaChannelD#(`TL_ARGS));
+  Bit#(sizeW) dataLogSize = fromInteger(valueOf(TLog#(dataW)));
+  TLSize dataSize = fromInteger(valueOf(dataW));
+
+  OpcodeD opcode = master.first.opcode;
+
+  Reg#(TLSize) sizeReg <- mkReg(?);
+  Reg#(Bool) isFirst <- mkReg(True);
+
+  TLSize sz = isFirst ? 1 << master.first.size : sizeReg;
+
+  Bool isLast =
+    dataSize >= sz || !hasDataD(opcode);
+
+  interface FifoO channel;
+    method first = master.first;
+    method canDeq = master.canDeq;
+
+    method Action deq;
+      action
+        master.deq;
+        isFirst <= isLast;
+        sizeReg <= sz - dataSize;
+      endaction
+    endmethod
+  endinterface
+
+  method size = when(master.canDeq, sz);
+
+  method nextSize = when(master.canDeq, isLast ? 0 : sz - dataSize);
+
+  method first = when(master.canDeq, isFirst);
+
+  method last = when(master.canDeq, isLast);
+endmodule

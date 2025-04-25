@@ -39,7 +39,7 @@ use to read or write data without caching.
 
 // Basic permissions as defined by the TileLink documentation
 typedef enum {
-  N = 2'd0, B = 2'd1, T = 2'd2
+  N = 2'd0, B = 2'd1, T = 2'd2, D = 2'd3
 } TLPerm deriving(Bits, FShow, Eq);
 
 instance Ord#(TLPerm);
@@ -134,19 +134,50 @@ typedef union tagged {
   Grow AcquirePerms;
   void PutData;
   void GetFull;
-} OpcodeA deriving(Bits, FShow, Eq);
+} OpcodeA deriving(Bits, Eq);
+
+instance FShow#(OpcodeA);
+  function Fmt fshow(OpcodeA opcode);
+    return case (opcode) matches
+      tagged AcquireBlock .grow : $format("AcquireBlock(", fshow(grow), ")");
+      tagged AcquirePerms .grow : $format("AcquirePerms(", fshow(grow), ")");
+      PutData : $format("Put");
+      GetFull : $format("Get");
+    endcase;
+  endfunction
+endinstance
 
 typedef union tagged {
   Cap ProbePerms;
   Cap ProbeBlock;
-} OpcodeB deriving(Bits, FShow, Eq);
+} OpcodeB deriving(Bits, Eq);
+
+instance FShow#(OpcodeB);
+  function Fmt fshow(OpcodeB opcode);
+    return case (opcode) matches
+      tagged ProbeBlock .cap : $format("ProbeBlock(", fshow(cap), ")");
+      tagged ProbePerms .cap : $format("ProbePerms(", fshow(cap), ")");
+    endcase;
+  endfunction
+endinstance
 
 typedef union tagged {
   Reduce ProbeAck;
   Reduce ProbeAckData;
   Reduce Release;
   Reduce ReleaseData;
-} OpcodeC deriving(Bits, FShow, Eq);
+} OpcodeC deriving(Bits, Eq);
+
+instance FShow#(OpcodeC);
+  function Fmt fshow(OpcodeC opcode);
+    return case (opcode) matches
+      tagged ProbeAck .reduce : $format("ProbeAck(", fshow(reduce), ")");
+      tagged ProbeAckData .reduce : $format("ProbeAckData(", fshow(reduce), ")");
+      tagged Release .reduce : $format("Release(", fshow(reduce), ")");
+      tagged ReleaseData .reduce : $format("ReleaseData(", fshow(reduce), ")");
+    endcase;
+  endfunction
+endinstance
 
 typedef union tagged {
   Cap Grant;
@@ -154,7 +185,19 @@ typedef union tagged {
   void ReleaseAck;
   void AccessAckData;
   void AccessAck;
-} OpcodeD deriving(Bits, FShow, Eq);
+} OpcodeD deriving(Bits, Eq);
+
+instance FShow#(OpcodeD);
+  function Fmt fshow(OpcodeD opcode);
+    return case (opcode) matches
+      tagged Grant .cap : $format("Grant(", fshow(cap), ")");
+      tagged GrantData .cap : $format("GrantData(", fshow(cap), ")");
+      AccessAckData : $format("AccessAckData");
+      ReleaseAck : $format("ReleaseAck");
+      AccessAck : $format("AccessAck");
+    endcase;
+  endfunction
+endinstance
 
 typedef enum {
   GrantAck

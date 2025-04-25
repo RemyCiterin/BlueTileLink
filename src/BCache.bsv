@@ -82,11 +82,15 @@ typedef enum {
   Idle,
   // Wait for matching
   Matching,
-  // Acquire+Release a cache line
+  // Acquire a cache line
   Acquire,
-  // Release a cache line (ex: Invalidation)
+  // Release (then acquire) a cache line
   Release,
-  // Probe
+  // Release permission and acquire cache block
+  AcqRel,
+  // Release without acquire
+  ReleaseNoAcq,
+  // Invalidations requests from the cache controller
   ProbeMatching,
   // Wait for the probe to acknoledge
   ProbeWait
@@ -170,20 +174,27 @@ module mkBCacheCore
     endaction
   endfunction
 
-  rule releaseBlockAck if (state[0] == Release);
+  rule releasePermsAck if (state[0] == AcqRel || state[0] == ReleaseNoAcq);
+    state[0] <= state[0] == ReleaseNoAcq ? Acquire : Idle;
     releaseM.releaseAck();
+  endrule
+
+  rule releaseBlockAck if (state[0] == Release);
     acquireM.acquireBlock(NtoT, {info.way, index, 0}, conf.encode(info.tag, index, 0));
+    releaseM.releaseAck();
     state[0] <= Acquire;
   endrule
 
-  rule acquireBlockAck if (state[0] == Acquire);
+  rule acquireBlockAck if (state[0] == Acquire || state[0] == AcqRel);
     let perm <- acquireM.acquireAck();
-    permRam[info.way].write(index, perm);
-    tagRam[info.way].write(index, info.tag);
 
     doAssert(perm >= info.perm, "Receive smaller permission than needed");
 
-    state[0] <= Idle;
+    perm = needPermT(info.op) && op != LoadReserve ? D : perm;
+    tagRam[info.way].write(index, info.tag);
+    permRam[info.way].write(index, perm);
+
+    state[0] <= state[0] == Acquire ? Idle : ReleaseNoAcq;
 
     if (info.op == LoadReserve) reserve();
 
@@ -230,6 +241,9 @@ module mkBCacheCore
       permRam[i].deq;
       tagRam[i].deq;
     end
+
+    // Same action for a Dirty and Thrunk cache block
+    perm = perm == D ? T : perm;
 
     case (tuple2(perm, probe.perm)) matches
       {N, .*} : releaseM.probePerms(NtoN);
@@ -291,11 +305,13 @@ module mkBCacheCore
         tagRam[i].deq();
       end
 
-      Bool hit = perm == T || (perm == B && !needPermT(op));
+      Bool hit = perm >= T || (perm == B && !needPermT(op));
       Bool stop = op == Stop || (!hit && isStoreConditional(op));
 
       if (hit) numHit <= numHit + 1;
       else numMis <= numMis + 1;
+
+      $display("source: %d hit: %d mis: %d", source, numHit, numMis);
 
       if (isStoreConditional(op))
         successQ.enq(hit && reserved);
@@ -303,7 +319,7 @@ module mkBCacheCore
       if (hit && op == LoadReserve) reserve();
       else unreserve();
 
-      if (stop) noAction;
+      if (stop) state[0] <= Idle;
       else if (hit) begin
         // Cache hit
         state[0] <= Idle;
@@ -317,13 +333,34 @@ module mkBCacheCore
           default : noAction;
         endcase
 
-      end else if (permRam[way].response == T) begin
-        releaseM.releaseBlock(TtoN, {way, index, 0}, conf.encode(tag,index,0));
+        // Set the cache block as dirty
+        if (needPermT(op) && op != LoadReserve) permRam[way].write(index, D);
+
+      end else if (t != tag && permRam[way].response != N) begin
+
+        let address = conf.encode(tag,index,0);
+        case (permRam[way].response) matches
+          D : releaseM.releaseBlock(TtoN, {way, index, 0}, address);
+          T : releaseM.releasePerms(TtoN, address);
+          B : releaseM.releasePerms(BtoN, address);
+        endcase
+
+        case (permRam[way].response) matches
+          D: state[0] <= Release;
+          default: begin
+            state[0] <= AcqRel;
+            acquireM.acquireBlock(
+              needPermT(op) ? (perm == N ? NtoT : BtoT) : NtoB,
+              {way, index,0}, address
+            );
+          end
+        endcase
+
+        doMiss(way, t, op, needPermT(op) ? T : B);
         permRam[way].write(index, N);
-        doMiss(way, t, op, T);
-        state[0] <= Release;
       end else begin
         doMiss(way, t, op, needPermT(op) ? T : B);
+
         state[0] <= Acquire;
         acquireM.acquireBlock(
           needPermT(op) ? (perm == N ? NtoT : BtoT) : NtoB,

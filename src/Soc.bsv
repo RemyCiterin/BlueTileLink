@@ -118,7 +118,7 @@ module mkCPU_SIM(Empty);
     endseq;
 
     increment[i] = seq
-      caches[i].start(1,0);
+      caches[i].start(2,0);
       caches[i].matching(1, Load);
       read[i];
 

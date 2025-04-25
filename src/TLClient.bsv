@@ -121,6 +121,10 @@ module mkTileLinkClientFSM#(
 
   Bit#(sizeW) logDataW = fromInteger(valueOf(TLog#(dataW)));
 
+  function Bit#(addrW) align(Bit#(addrW) address);
+    return address & ~((1 << logSize) - 1);
+  endfunction
+
   Reg#(TLClientState) state <- mkReg(IDLE);
   Reg#(TLClientState) nextState <- mkReg(IDLE);
 
@@ -144,13 +148,9 @@ module mkTileLinkClientFSM#(
   Reg#(TLSize) releaseSize <- mkReg(0);
   Reg#(Bit#(addrW)) releaseAddr <- mkReg(0);
 
-  // Probe state
   sourceIdx numSource = fromInteger(valueOf(nSource));
-  Reg#(Bit#(addrW)) probeAddr <- mkReg(0);
-  Reg#(sourceIdx) probeCount <- mkReg(?);
-  Reg#(sourceIdx) probeNext <- mkReg(?);
-  Reg#(TLSize) probeSize <- mkReg(0);
-  Reg#(Bool) exclusive <- mkReg(?);
+
+  ProbeFSM#(0, nSource, `TL_ARGS) probeM <- mkProbeFSM(logSize, master, sources);
 
   // Grant state
   Reg#(Bit#(addrW)) grantSize <- mkReg(0);
@@ -160,24 +160,22 @@ module mkTileLinkClientFSM#(
   Ehr#(2, Bool) needFill <- mkEhr(False);
 
   rule receiveChannelA if (state == IDLE && !waitAccessAck);
-    state <= 1 >= numSource ? GRANT_BURST : PROBE_WAIT;
-    channelA <= master.channelA.first;
-    probeCount <= numSource - 1;
+    let msg = master.channelA.first;
+
     grantSize <= 1 << logSize;
     master.channelA.deq;
-    exclusive <= True;
-    probeNext <= 0;
+    channelA <= msg;
 
     if (verbose)
-      $display("Client: ", fshow(master.channelA.first));
+      $display("Client: ", fshow(msg));
 
     buffer.start();
-    fillAddr[0] <= master.channelA.first.address;
+    fillAddr[0] <= msg.address;
     fillSize[0] <= 1 << logSize;
     needFill[0] <= True;
 
     slave.channelA.enq(ChannelA{
-      address: master.channelA.first.address,
+      address: msg.address,
       opcode: GetFull,
       size: logSize,
       source: sink,
@@ -185,89 +183,45 @@ module mkTileLinkClientFSM#(
       data: ?
     });
 
-    doAssert(master.channelA.first.size == logSize, "Invalid channel A request size");
+    doAssert(msg.size == logSize, "Invalid channel A request size");
+
+    Bit#(nSource) srcs = -1;
+    for (Integer i=0; i < valueOf(nSource); i = i + 1) begin
+      if (sources[i] == msg.source) srcs[i] = 0;
+    end
+
+    if (numSource > 1) begin
+      Cap cap = permChannelA(msg.opcode) == T ? N : B;
+      probeM.start(?, ProbeBlock(cap), align(msg.address), srcs);
+      state <= PROBE_WAIT;
+    end else
+      state <= GRANT_BURST;
   endrule
 
-  rule sendProbe if (state == PROBE_WAIT && probeNext < numSource);
-    Cap cap = permChannelA(channelA.opcode) == T ? N : B;
-
-    let source = sources[probeNext];
-    if (source != channelA.source)
-      master.channelB.enq(ChannelB{
-        address: channelA.address,
-        opcode: ProbeBlock(cap),
-        size: channelA.size,
-        source: source
-      });
-
-    probeNext <= probeNext + 1;
-  endrule
-
-  rule receiveProbeAck if (
-      state == PROBE_WAIT &&&
-      master.channelC.first.opcode matches tagged ProbeAck .reduce
-    );
-
-    if (verbose)
-      $display("Client: ", fshow(master.channelC.first));
-
-    master.channelC.deq;
-    doAssert(probeCount != 0, "Receive more ProbeAck than expected");
-
-    if (reduceTo(reduce) != N && master.channelC.first.source != channelA.source)
-      exclusive <= False;
-
-    probeCount <= probeCount - 1;
-
-    if (probeCount == 1) state <= GRANT_BURST;
-  endrule
-
-  rule receiveProbeAckData if (
-      (state == PROBE_WAIT || state == PROBE_BURST) &&&
-      master.channelC.first.opcode matches tagged ProbeAckData .reduce &&&
+  rule probeWrite
+    if (
+      (state == PROBE_WAIT || state == PROBE_BURST) &&
       (!waitAccessAck || state == PROBE_BURST)
     );
 
-    let msg = master.channelC.first;
+    match {.*, .data, .last} <- probeM.write;
 
-    if (verbose)
-      $display("Client: ", fshow(msg));
-
-    doAssert(msg.size == logSize, "Receive ProbeAckData of an incorrcet size");
-    TLSize size = state == PROBE_BURST ? probeSize : 1 << channelA.size;
-    Bit#(addrW) addr = state == PROBE_BURST ? probeAddr : channelA.address;
-    Bool first = state != PROBE_BURST;
-
-    if (first) waitAccessAck <= True;
+    buffer.enqProbe(data);
     slave.channelA.enq(ChannelA{
-      address: msg.address,
+      address: channelA.address,
       opcode: PutData,
-      data: msg.data,
+      data: data,
       size: logSize,
       source: sink,
       mask: -1
     });
-    buffer.enqProbe(msg.data);
 
-    master.channelC.deq;
-    if (reduceTo(reduce) != N && msg.source != channelA.source)
-      exclusive <= False;
+    waitAccessAck <= True;
 
-    doAssert(probeCount != 0, "Receive more ProbeAckData than expected");
-
-    probeSize <= size - fromInteger(valueOf(dataW));
-    probeAddr <= addr + fromInteger(valueOf(dataW));
-    Bool last = size == fromInteger(valueOf(dataW));
-
-    if (last) begin
-      state <= probeCount == 1 ? GRANT_BURST : PROBE_WAIT;
-      probeCount <= probeCount - 1;
-    end else begin
-      state <= PROBE_BURST;
-    end
+    state <= last ? PROBE_WAIT : PROBE_BURST;
   endrule
 
-  (* preempts = "receiveProbeAckData,rresponseMEM" *)
+  (* preempts = "probeWrite,rresponseMEM" *)
   rule rresponseMEM
     if (
       needFill[0] && fillSize[0] > 0 &&
@@ -285,13 +239,18 @@ module mkTileLinkClientFSM#(
     end
   endrule
 
+  rule toGrant if (state == PROBE_WAIT);
+    state <= GRANT_BURST;
+    probeM.finish;
+  endrule
+
   rule sendGrant if (state == GRANT_BURST);
     let data <- buffer.deq;
 
     Bool last = grantSize == fromInteger(valueOf(dataW));
 
     master.channelD.enq(ChannelD{
-      opcode: GrantData(exclusive ? T : B),
+      opcode: GrantData(probeM.exclusive ? T : B),
       source: channelA.source,
       size: channelA.size,
       sink: sink,
@@ -393,6 +352,9 @@ interface ProbeFSM#(numeric type indexW, numeric type nSource, `TL_ARGS_DECL);
   // Request to the FSM to send a probe signal to a set of sources, and write-back the result
   method Action start(Bit#(indexW) index, OpcodeB opcode, Bit#(addrW) address, Bit#(nSource) owners);
 
+  // Write a received data lane to the response buffer
+  method ActionValue#(Tuple3#(Bit#(indexW), Byte#(dataW), Bool)) write;
+
   // Return if any agent still own the data
   method Bool exclusive;
 
@@ -403,8 +365,7 @@ endinterface
 module mkProbeFSM#(
     Bit#(sizeW) logSize,
     TLMaster#(`TL_ARGS) master,
-    Vector#(nSource, Bit#(sourceW)) sources,
-    Bram#(Bit#(indexW), Byte#(dataW)) bram
+    Vector#(nSource, Bit#(sourceW)) sources
   ) (ProbeFSM#(indexW, nSource, `TL_ARGS))
   provisos (Alias#(Bit#(TAdd#(1, TLog#(nSource))), sourceIdx));
 
@@ -416,7 +377,6 @@ module mkProbeFSM#(
   Bit#(sizeW) logDataW = fromInteger(valueOf(TLog#(dataW)));
 
   Reg#(Bit#(addrW)) address <- mkReg(?);
-  Reg#(sourceIdx) next <- mkReg(?);
   Reg#(Bool) exc <- mkReg(?);
 
   Reg#(Bit#(nSource)) toSend <- mkReg(0);
@@ -424,6 +384,7 @@ module mkProbeFSM#(
 
   Reg#(OpcodeB) opcode <- mkReg(?);
   Reg#(Bit#(indexW)) index <- mkReg(?);
+  Reg#(Bool) hasData <- mkReg(?);
 
   Reg#(Bool) busy <- mkReg(False);
 
@@ -438,59 +399,71 @@ module mkProbeFSM#(
   endfunction
 
   rule receiveProbeAck
-    if (message.opcode matches tagged ProbeAck .reduce &&& message.address == address);
+    if (message.opcode matches tagged ProbeAck .reduce);
 
     let idx = findSource(message.source);
     doAssert(toReceive[idx] == 1, "Receive two ProbeAck from the same source");
     toReceive[idx] <= 0;
+
+    if (verbose)
+      $display("Client: ", fshow(message));
 
     if (reduceTo(reduce) != N) exc <= False;
 
     channelC.deq;
   endrule
 
-  rule receiveProbeAckData
-    if (message.opcode matches tagged ProbeAckData .reduce &&& message.address == address);
+  rule sendProbe if (firstOneFrom(toSend,0) matches tagged Valid .idx);
+
+    let source = sources[idx];
+    ChannelB#(`TL_ARGS) msg = ChannelB{
+      address: address,
+      opcode: opcode,
+      source: source,
+      size: logSize
+    };
+
+    master.channelB.enq(msg);
+    toSend[idx] <= 0;
+  endrule
+
+  method ActionValue#(Tuple3#(Bit#(indexW), Byte#(dataW), Bool)) write
+    if (message.opcode matches tagged ProbeAckData .reduce);
 
     let idx = findSource(message.source);
-    doAssert(toReceive[idx] == 1, "Receive two ProbeAck from the same source");
+    doAssert(toReceive[idx] == 1, "Receive two ProbeAckData from the same source");
+    doAssert(!hasData, "Receive a cache block from a Probe request multiple times");
     channelC.deq;
 
-    bram.write(index, message.data);
+    if (verbose)
+      $display("Client: ", fshow(message));
+
     index <= index + 1;
 
     if (metaC.last) begin
       if (reduceTo(reduce) != N) exc <= False;
       toReceive[idx] <= 0;
+      hasData <= True;
     end
-  endrule
 
-  rule sendProbe if (firstOneFrom(toSend,0) matches tagged Valid .idx);
-    let source = sources[idx];
-    master.channelB.enq(ChannelB{
-      address: address,
-      opcode: opcode,
-      source: source,
-      size: logSize
-    });
+    return tuple3(index, message.data, metaC.last);
+  endmethod
 
-    toSend[idx] <= 0;
-  endrule
-
-  method Action start(Bit#(indexW) idx, OpcodeB op, Bit#(addrW) addr, Bit#(nSource) owners);
+  method Action start(Bit#(indexW) idx, OpcodeB op, Bit#(addrW) addr, Bit#(nSource) owners)
+    if (!busy);
     action
-      next <= 0;
-      exc <= False;
+      exc <= True;
       busy <= True;
       index <= idx;
       opcode <= op;
       address <= addr;
+      hasData <= False;
       toSend <= owners;
       toReceive <= owners;
     endaction
   endmethod
 
-  method Action finish if (toReceive == 0 && busy);
+  method Action finish if (toReceive == 0 && toSend == 0 && busy);
     action
       busy <= False;
     endaction

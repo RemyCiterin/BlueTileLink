@@ -31,6 +31,11 @@ import Utils :: *;
 import Fifo :: *;
 import Ehr :: *;
 
+export AcquireFSM(..);
+export ReleaseFSM(..);
+export mkAcquireFSM;
+export mkReleaseFSM;
+
 `include "TL.defines"
 
 Bool verbose = False;
@@ -41,6 +46,18 @@ interface AcquireFSM#(type indexT, `TL_ARGS_DECL);
   method Action acquireBlock(Grow grow, indexT idx, Bit#(addrW) addr);
   method Action acquirePerms(Grow grow, Bit#(addrW) addr);
   method ActionValue#(TLPerm) acquireAck();
+
+  // Return if their is currently an acquire request
+  method Bool active;
+
+  // Return the address of the acquire request, is it exist
+  method Bit#(addrW) address;
+
+  // Return if the grant sequence already started
+  method Bool grant;
+
+  // Return the requested transition permission of the current request
+  method Grow grow;
 endinterface
 
 /*
@@ -69,6 +86,8 @@ module mkAcquireFSM
   Reg#(TLPerm) perm <- mkReg(?);
 
   Reg#(Bool) grantStarted <- mkReg(False);
+  Reg#(Bit#(addrW)) addrReg <- mkReg(?);
+  Reg#(Grow) growReg <- mkReg(?);
 
   rule receiveGrantData
     if (
@@ -141,6 +160,7 @@ module mkAcquireFSM
         "The size of an acquire request must be bigger than the bus width"
       );
 
+      addrReg <= addr;
       slave.channelA.enq(ChannelA{
         opcode: opcode,
         source: source,
@@ -167,6 +187,7 @@ module mkAcquireFSM
     action
       size <= 1; // magic number used for some assert
       doAcquire(AcquirePerms(grow), ?, addr);
+      growReg <= grow;
     endaction
   endmethod
 
@@ -175,6 +196,7 @@ module mkAcquireFSM
     action
       doAcquire(AcquireBlock(grow), idx, addr);
       size <= 1 << logSize;
+      growReg <= grow;
     endaction
   endmethod
 
@@ -184,6 +206,11 @@ module mkAcquireFSM
     valid <= False;
     return perm;
   endmethod
+
+  method Bool active = valid;
+  method Bit#(addrW) address = addrReg;
+  method Bool grant = grantStarted;
+  method Grow grow = growReg;
 endmodule
 
 // A module to send release/probe-ack burst, this module only send the messages,
@@ -307,8 +334,16 @@ interface ReleaseFSM#(type indexT, `TL_ARGS_DECL);
   method Action releaseBlock(Reduce reduce, indexT index, Bit#(addrW) addr);
   method Action releasePerms(Reduce reduce, Bit#(addrW) addr);
   method Action releaseAck();
-endinterface
 
+  // Return if their is currently a transfers
+  method Bool active;
+
+  // Return the address of the current transfers if it exists
+  method Bit#(addrW) address;
+
+  // Return the reduction of the current transfers if it exists
+  method Reduce reduce;
+endinterface
 
 typedef enum {
   // Wait to receive a source identifier
@@ -335,6 +370,9 @@ module mkReleaseFSM
   Reg#(Bool) needData <- mkReg(?);
 
   Reg#(Bit#(sourceW)) source <- mkReg(?);
+
+  Reg#(Bit#(addrW)) addrReg <- mkReg(?);
+  Reg#(Reduce) reduceReg <- mkReg(?);
 
   BurstFSM#(Bit#(indexW), `TL_ARGS) burstM <- mkBurstFSM(bram, slave);
 
@@ -384,6 +422,8 @@ module mkReleaseFSM
       state[1] <= PROBE_BURST;
       doAssert(reduce != NtoN, "ProbeAckData an invalid data");
       burstM.startBurst(ProbeAckData(reduce), index, message.address, logSize);
+      addrReg <= message.address;
+      reduceReg <= reduce;
     endaction
   endmethod
 
@@ -392,6 +432,8 @@ module mkReleaseFSM
     action
       state[1] <= PROBE_BURST;
       burstM.startBurst(ProbeAck(reduce), ?, message.address, logSize);
+      addrReg <= message.address;
+      reduceReg <= reduce;
     endaction
   endmethod
 
@@ -417,6 +459,8 @@ module mkReleaseFSM
     action
       state[1] <= RELEASE_BURST;
       burstM.startBurst(ReleaseData(reduce), index, addr, logSize);
+      reduceReg <= reduce;
+      addrReg <= addr;
     endaction
   endmethod
 
@@ -425,6 +469,8 @@ module mkReleaseFSM
     action
       state[1] <= RELEASE_BURST;
       burstM.startBurst(Release(reduce), ?, addr, logSize);
+      reduceReg <= reduce;
+      addrReg <= addr;
     endaction
   endmethod
 
@@ -434,19 +480,8 @@ module mkReleaseFSM
       state[0] <= IDLE;
     endaction
   endmethod
+
+  method active = state[1] != IDLE && state[1] != INIT;
+  method reduce = reduceReg;
+  method address = addrReg;
 endmodule
-
-interface TileLinkServerFSM#(type indexT, `TL_ARGS_DECL);
-  method Action setSource(Bit#(sourceW) source);
-
-  method Action acquireBlock(Grow grow, indexT idx, Bit#(addrW) addr);
-  method Action acquirePerms(Grow grow, Bit#(addrW) addr);
-  method ActionValue#(TLPerm) acquireAck();
-
-  method Action releaseBlock(Reduce reduce, indexT idx, Bit#(addrW) addr);
-  method Action releaseAck();
-
-  method ActionValue#(Tuple2#(Bit#(addrW), TLPerm)) probeBlock;
-  method Action probeAck(Reduce reduce, indexT idx);
-  method Action probeFinish();
-endinterface

@@ -40,18 +40,6 @@ typedef enum {
   RELEASE_BURST = 7
 } TLClientState deriving(FShow, Eq, Bits);
 
-// Receive put, release, or probe burst
-interface ReceiveBurstFSM#(numeric type nSource, `TL_ARGS_DECL);
-  // Must receive `nSource` ProbeAck or ProbeAckData messages
-  // it it receive a ProbeAckData it perform the grant directly
-  method Action probeAck(Grow grow, Bit#(addrW) addr);
-  // Return if one of the probe response was ProbeAckData,
-  method ActionValue#(Bool) receiveProbeAck;
-
-  method Action put();
-  method Action putAck();
-endinterface
-
 interface AcquireBuffer#(`TL_ARGS_DECL);
   // Write into the buffer a beat from a cache due to a probe request
   method Action enqProbe(Byte#(dataW) value);
@@ -116,109 +104,6 @@ module mkAcquireBuffer#(Bit#(sizeW) logSize) (AcquireBuffer#(`TL_ARGS));
       doAssert(probeHead == 0, "probe head must be 0");
       doAssert(deqHead == 0, "deq head must be 0");
       memHead <= Valid(0);
-    endaction
-  endmethod
-endmodule
-
-interface ProbeFSM#(numeric type nSource, `TL_ARGS_DECL);
-  // Start a probe sequence with all the sources indicated by the mask
-  method Action start(Bit#(nSource) mask, OpcodeB opcode, Bit#(addrW) addr);
-
-  method ActionValue#(Byte#(dataW)) deq;
-  method Action finish();
-  method Bool exclusive;
-endinterface
-
-module mkProbeFSM#(
-    Bit#(sinkW) sink,
-    Bit#(sizeW) logSize,
-    TLMaster#(`TL_ARGS) master,
-    Bram#(Bit#(addrW), Byte#(dataW)) bram,
-    Vector#(nSource, Bit#(sourceW)) sources
-  ) (ProbeFSM#(nSource, `TL_ARGS))
-  provisos (Alias#(Bit#(TAdd#(1, TLog#(nSource))), sourceIdx));
-
-  Reg#(Bool) busy <- mkReg(False);
-
-  sourceIdx numSource = fromInteger(valueOf(nSource));
-  Reg#(Bit#(nSource)) probeMask <- mkReg(?);
-  Reg#(Bit#(addrW)) acquireAddr <- mkReg(?);
-  Reg#(sourceIdx) probeNext <- mkReg(?);
-  Reg#(OpcodeB) opcode <- mkReg(?);
-  Reg#(Bool) exc <- mkReg(?);
-
-  Reg#(Bit#(addrW)) probeAddr <- mkReg(0);
-  Reg#(TLSize) probeSize <- mkReg(0);
-
-  rule sendProbe if (busy && probeNext < numSource);
-    let source = sources[probeNext];
-
-    if (probeMask[source] == 1)
-      master.channelB.enq(ChannelB{
-        address: acquireAddr,
-        source: source,
-        opcode: opcode,
-        size: logSize
-      });
-
-    probeNext <= probeNext + 1;
-  endrule
-
-  rule receiveProbeAck
-    if (busy &&& master.channelC.first.opcode matches tagged ProbeAck .reduce);
-    let msg = master.channelC.first;
-
-    if (verbose) $display("Client: ", fshow(msg));
-
-    master.channelC.deq;
-    doAssert(probeMask[msg.source] == 1, "Receive more ProbeAck than expected");
-
-    if (reduceTo(reduce) != N) exc <= False;
-
-    probeMask[msg.source] <= 0;
-  endrule
-
-  method ActionValue#(Byte#(dataW)) deq
-    if (busy &&& master.channelC.first.opcode matches tagged ProbeAckData .reduce);
-    let msg = master.channelC.first;
-
-    if (verbose) $display("Client: ", fshow(msg));
-
-    doAssert(msg.size == logSize, "Receive ProbeAckData of an incorrcet size");
-    Bit#(addrW) addr = probeSize != 0 ? probeAddr : acquireAddr;
-    TLSize size = probeSize != 0 ? probeSize : 1 << logSize;
-    Bool first = size != 0;
-
-    master.channelC.deq;
-    if (reduceTo(reduce) != N) exc <= False;
-
-    doAssert(probeMask[msg.source] == 1, "Receive more ProbeAckData than expected");
-
-    probeSize <= size - fromInteger(valueOf(dataW));
-    probeAddr <= addr + fromInteger(valueOf(dataW));
-    Bool last = size == fromInteger(valueOf(dataW));
-
-    if (last) begin
-      probeMask[msg.source] <= 0;
-    end
-
-    return msg.data;
-  endmethod
-
-  method Action start(Bit#(nSource) mask, OpcodeB op, Bit#(addrW) a);
-    probeMask <= mask;
-    probeAddr <= a;
-    probeNext <= 0;
-    busy <= True;
-    opcode <= op;
-    exc <= True;
-  endmethod
-
-  method exclusive = exc;
-
-  method Action finish() if (probeMask == 0);
-    action
-      busy <= False;
     endaction
   endmethod
 endmodule
@@ -500,4 +385,116 @@ module mkTileLinkClientFSM#(
     slave.channelD.deq;
     waitAccessAck <= False;
   endrule
+endmodule
+
+// An interface used by a cache to have a TileLink Client interface, can be
+// used as example by a Snoop Filter, a LLC, or just a snoop controller
+interface ProbeFSM#(numeric type indexW, numeric type nSource, `TL_ARGS_DECL);
+  // Request to the FSM to send a probe signal to a set of sources, and write-back the result
+  method Action start(Bit#(indexW) index, OpcodeB opcode, Bit#(addrW) address, Bit#(nSource) owners);
+
+  // Return if any agent still own the data
+  method Bool exclusive;
+
+  // Finish th eprobe sequence
+  method Action finish;
+endinterface
+
+module mkProbeFSM#(
+    Bit#(sizeW) logSize,
+    TLMaster#(`TL_ARGS) master,
+    Vector#(nSource, Bit#(sourceW)) sources,
+    Bram#(Bit#(indexW), Byte#(dataW)) bram
+  ) (ProbeFSM#(indexW, nSource, `TL_ARGS))
+  provisos (Alias#(Bit#(TAdd#(1, TLog#(nSource))), sourceIdx));
+
+  let metaC <- mkMetaChannelC(master.channelC);
+  let channelC = metaC.channel;
+  let message = channelC.first;
+
+  sourceIdx numSource = fromInteger(valueOf(nSource));
+  Bit#(sizeW) logDataW = fromInteger(valueOf(TLog#(dataW)));
+
+  Reg#(Bit#(addrW)) address <- mkReg(?);
+  Reg#(sourceIdx) next <- mkReg(?);
+  Reg#(Bool) exc <- mkReg(?);
+
+  Reg#(Bit#(nSource)) toSend <- mkReg(0);
+  Reg#(Bit#(nSource)) toReceive <- mkReg(0);
+
+  Reg#(OpcodeB) opcode <- mkReg(?);
+  Reg#(Bit#(indexW)) index <- mkReg(?);
+
+  Reg#(Bool) busy <- mkReg(False);
+
+  function sourceIdx findSource(Bit#(sourceW) source);
+    sourceIdx idx = ?;
+
+    for (Integer i=0; i < valueOf(nSource); i = i + 1) begin
+      if (source == sources[i]) idx = fromInteger(i);
+    end
+
+    return idx;
+  endfunction
+
+  rule receiveProbeAck
+    if (message.opcode matches tagged ProbeAck .reduce &&& message.address == address);
+
+    let idx = findSource(message.source);
+    doAssert(toReceive[idx] == 1, "Receive two ProbeAck from the same source");
+    toReceive[idx] <= 0;
+
+    if (reduceTo(reduce) != N) exc <= False;
+
+    channelC.deq;
+  endrule
+
+  rule receiveProbeAckData
+    if (message.opcode matches tagged ProbeAckData .reduce &&& message.address == address);
+
+    let idx = findSource(message.source);
+    doAssert(toReceive[idx] == 1, "Receive two ProbeAck from the same source");
+    channelC.deq;
+
+    bram.write(index, message.data);
+    index <= index + 1;
+
+    if (metaC.last) begin
+      if (reduceTo(reduce) != N) exc <= False;
+      toReceive[idx] <= 0;
+    end
+  endrule
+
+  rule sendProbe if (firstOneFrom(toSend,0) matches tagged Valid .idx);
+    let source = sources[idx];
+    master.channelB.enq(ChannelB{
+      address: address,
+      opcode: opcode,
+      source: source,
+      size: logSize
+    });
+
+    toSend[idx] <= 0;
+  endrule
+
+  method Action start(Bit#(indexW) idx, OpcodeB op, Bit#(addrW) addr, Bit#(nSource) owners);
+    action
+      next <= 0;
+      exc <= False;
+      busy <= True;
+      index <= idx;
+      opcode <= op;
+      address <= addr;
+      toSend <= owners;
+      toReceive <= owners;
+    endaction
+  endmethod
+
+  method Action finish if (toReceive == 0 && busy);
+    action
+      busy <= False;
+    endaction
+  endmethod
+
+  method Bool exclusive = exc;
 endmodule

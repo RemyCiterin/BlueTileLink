@@ -106,7 +106,6 @@ module mkBCacheCore
 
   Vector#(TExp#(wayW), Bram#(Bit#(indexW), TLPerm)) permRam <- replicateM(mkBramInit(N));
   Vector#(TExp#(wayW), Bram#(Bit#(indexW), Bit#(tagW))) tagRam <- replicateM(mkBram());
-  Vector#(TExp#(wayW), Bram#(Bit#(indexW), Bool)) reservedRam <- replicateM(mkBram());
 
   Bit#(sizeW) logSize = fromInteger(valueOf(offsetW) + valueOf(TLog#(dataW)));
 

@@ -13,6 +13,10 @@ import TLBram :: *;
 
 import TLTypes :: *;
 import MSHR :: *;
+import NBCache :: *;
+import TLXBar :: *;
+
+import Connectable :: *;
 
 module mkCPU(Empty);
 endmodule
@@ -25,6 +29,185 @@ typedef 8 SizeW;
 
 typedef 2 NCache;
 
+typedef 2 MSHR;
+
+(* synthesize *)
+module mkTestNBCache#(Vector#(TAdd#(MSHR,1), Bit#(SourceW)) sources)
+  (TLMaster#(AddrW, DataW, SizeW, SourceW, SinkW));
+
+  function Bit#(32) encode(Bit#(20) tag, Bit#(6) index, Bit#(4) offset) =
+    {tag, index, offset, 0};
+
+  function Tuple3#(Bit#(20),Bit#(6),Bit#(4)) decode(Bit#(32) addr) =
+    tuple3(addr[31:12], addr[11:6], addr[5:2]);
+
+  NBCacheCore#(MSHR, 2, Bit#(20), Bit#(6), Bit#(4), AddrW, DataW, SizeW, SourceW, SinkW) cache
+    <- mkNBCacheCore(NBCacheConf{encode: encode, decode: decode});
+
+  rule init;
+    $display(fshow(sources));
+    cache.setSources(sources);
+  endrule
+
+  rule free;
+    let m <- cache.free;
+    $display("free %d", m);
+  endrule
+
+  Vector#(MSHR, Reg#(Maybe#(Token#(MSHR)))) mshr <- replicateM(mkReg(?));
+  Vector#(MSHR, Reg#(Bit#(32))) response <- replicateM(mkReg(?));
+
+  function Stmt read(Token#(MSHR) id, Bit#(20) tag, Bit#(6) index, Bit#(4) offset) = seq
+    mshr[id] <= Valid(?);
+
+    while (mshr[id] != Invalid) seq
+      cache.start(index,offset);
+      action
+        let m <- cache.matching(tag,True,?,?);
+        mshr[id] <= m;
+      endaction
+    endseq
+
+    action
+      let r <- cache.response;
+      response[id] <= r;
+    endaction
+  endseq;
+
+  Stmt main = seq
+    par
+      read(0,0,0,0);
+      read(1,0,0,0);
+    endpar
+
+    while (True) noAction;
+  endseq;
+
+  mkAutoFSM(main);
+
+  return cache.master;
+endmodule
+
+interface TestBCache;
+  interface TLMaster#(AddrW, DataW, SizeW, SourceW, SinkW) master;
+  method Action incr;
+
+  method Action readCounter(Bit#(32) count);
+endinterface
+
+(* synthesize *)
+module mkTestBCache#(Bit#(SourceW) source) (TestBCache);
+  Fifo#(2, ChannelA#(AddrW, DataW, SizeW, SourceW, SinkW)) fifoA <- mkFifo;
+  Fifo#(2, ChannelB#(AddrW, DataW, SizeW, SourceW, SinkW)) fifoB <- mkFifo;
+  Fifo#(2, ChannelC#(AddrW, DataW, SizeW, SourceW, SinkW)) fifoC <- mkFifo;
+  Fifo#(2, ChannelD#(AddrW, DataW, SizeW, SourceW, SinkW)) fifoD <- mkFifo;
+  Fifo#(2, ChannelE#(AddrW, DataW, SizeW, SourceW, SinkW)) fifoE <- mkFifo;
+
+  let slave = interface TLSlave;
+    interface channelA = toFifoI(fifoA);
+    interface channelB = toFifoO(fifoB);
+    interface channelC = toFifoI(fifoC);
+    interface channelD = toFifoO(fifoD);
+    interface channelE = toFifoI(fifoE);
+  endinterface;
+
+  function Bit#(32) encode(Bit#(20) tag, Bit#(6) index, Bit#(4) offset) =
+    {tag, index, offset, 0};
+
+  function Tuple3#(Bit#(20),Bit#(6),Bit#(4)) decode(Bit#(32) addr) =
+    tuple3(addr[31:12], addr[11:6], addr[5:2]);
+
+  Integer nCache = valueOf(NCache);
+  BCacheCore#(Bit#(1), Bit#(20), Bit#(6), Bit#(4), AddrW, DataW, SizeW, SourceW, SinkW)
+    cache <- mkBCacheCore(BCacheConf{encode: encode, decode: decode},slave);
+
+  rule setSource;
+    cache.setSource(source);
+  endrule
+
+  Wire#(Bit#(32)) counter <- mkBypassWire;
+
+  Reg#(Bit#(32)) cycle <- mkReg(0);
+  rule incrCycle;
+    cycle <= cycle + 1;
+  endrule
+
+  Reg#(Bit#(32)) response <- mkReg(?);
+
+  Action read = action
+    let x <- cache.response;
+    response <= x;
+  endaction;
+
+  Stmt lock = seq
+    response <= 0;
+
+    while (response == 0) seq
+      cache.start(0,0);
+      cache.matching(0, LoadReserve);
+      read;
+      $display(cycle, " try %d is %s", source, response == 0 ? "success" : "fail");
+      if (response == 0) seq
+        cache.start(0,0);
+        cache.matching(0,tagged StoreConditional {mask: 1, data: 1});
+        action
+          let x <- cache.success;
+          $display(cycle, " success: %b", x);
+          response <= x ? 1 : 0;
+        endaction
+      endseq else
+        response <= 0;
+    endseq
+  endseq;
+
+  Stmt unlock = seq
+    cache.start(0,0);
+    cache.matching(0, tagged Store {data: 0, mask: 1});
+  endseq;
+
+  Stmt increment = seq
+    cache.start(2,0);
+    cache.matching(1, Load);
+    read;
+
+    cache.start(1,0);
+    cache.matching(0, Load);
+    read;
+    $display(cycle, " counter %d: %d at %d", source, response, cycle);
+    cache.start(1,0);
+    cache.matching(0, tagged Store {data: response+1, mask: 15});
+  endseq;
+
+  Fifo#(2, void) incrQ <- mkFifo;
+
+  Stmt main = seq
+    while (True) seq
+      lock;
+      increment;
+      doAssert(counter == response, "ERROR!");
+      incrQ.enq(?);
+      while (incrQ.canDeq) noAction;
+      unlock;
+      //delay(100);
+    endseq
+  endseq;
+
+  mkAutoFSM(main);
+
+  method incr = incrQ.deq;
+
+  method readCounter = counter._write;
+
+  interface TLMaster master;
+    interface channelA = toFifoO(fifoA);
+    interface channelB = toFifoI(fifoB);
+    interface channelC = toFifoO(fifoC);
+    interface channelD = toFifoI(fifoD);
+    interface channelE = toFifoO(fifoE);
+  endinterface
+endmodule
+
+(* synthesize *)
 module mkCPU_SIM(Empty);
   Reg#(Bit#(32)) cycle <- mkReg(0);
 
@@ -36,11 +219,11 @@ module mkCPU_SIM(Empty);
     end
   endrule
 
-  Fifo#(TAdd#(2, NCache), ChannelA#(AddrW, DataW, SizeW, SourceW, SinkW)) channelA <- mkFifo;
-  Fifo#(TAdd#(2, NCache), ChannelB#(AddrW, DataW, SizeW, SourceW, SinkW)) channelB <- mkFifo;
-  Fifo#(TAdd#(2, NCache), ChannelC#(AddrW, DataW, SizeW, SourceW, SinkW)) channelC <- mkFifo;
-  Fifo#(TAdd#(2, NCache), ChannelD#(AddrW, DataW, SizeW, SourceW, SinkW)) channelD <- mkFifo;
-  Fifo#(TAdd#(2, NCache), ChannelE#(AddrW, DataW, SizeW, SourceW, SinkW)) channelE <- mkFifo;
+  Fifo#(2, ChannelA#(AddrW, DataW, SizeW, SourceW, SinkW)) channelA <- mkFifo;
+  Fifo#(2, ChannelB#(AddrW, DataW, SizeW, SourceW, SinkW)) channelB <- mkFifo;
+  Fifo#(2, ChannelC#(AddrW, DataW, SizeW, SourceW, SinkW)) channelC <- mkFifo;
+  Fifo#(2, ChannelD#(AddrW, DataW, SizeW, SourceW, SinkW)) channelD <- mkFifo;
+  Fifo#(2, ChannelE#(AddrW, DataW, SizeW, SourceW, SinkW)) channelE <- mkFifo;
 
   let slave = interface TLSlave;
     interface channelA = toFifoI(channelA);
@@ -62,114 +245,57 @@ module mkCPU_SIM(Empty);
 
   Bit#(sizeW) logSize = 6;
 
-  Vector#(NCache, TLSlave#(AddrW, DataW, SizeW, SourceW, SinkW)) slaves <-
-    mkVectorTLSlave(slave);
-
-  function Bit#(32) encode(Bit#(20) tag, Bit#(6) index, Bit#(4) offset) =
-    {tag, index, offset, 0};
-
-  function Tuple3#(Bit#(20),Bit#(6),Bit#(4)) decode(Bit#(32) addr) =
-    tuple3(addr[31:12], addr[11:6], addr[5:2]);
-
   Integer nCache = valueOf(NCache);
-  Vector#(NCache, BCacheCore#(Bit#(1), Bit#(20), Bit#(6), Bit#(4), AddrW, DataW, SizeW, SourceW, SinkW))
-    caches <- mapM(mkBCacheCore(BCacheConf{encode: encode, decode: decode}), slaves);
-
-  Vector#(NCache, Bit#(SourceW)) sources = Vector::genWith(fromInteger);
-
-  function Bit#(SourceW) repr(Bit#(SourceW) source);
-    return source;
-  endfunction
-
-  let rom_controller <- mkTLBram(rom);
-  mkTileLinkClientFSM(0, logSize, master, rom_controller, repr, sources);
-
-  Vector#(NCache, Reg#(Bit#(32))) response <- replicateM(mkReg(0));
-
-  Vector#(NCache, Stmt) lock = ?;
-  Vector#(NCache, Action) read = ?;
-  Vector#(NCache, Stmt) unlock = ?;
-  Vector#(NCache, Stmt) increment = ?;
-  for (Integer i=0; i < nCache; i = i + 1) begin
-    read[i] = action
-      let x <- caches[i].response;
-      response[i] <= x;
-    endaction;
-
-    lock[i] = seq
-      response[i] <= 0;
-
-      while (response[i] == 0) seq
-        caches[i].start(0,0);
-        caches[i].matching(0, LoadReserve);
-        read[i];
-        $display(cycle, " try %d is %s", i, response[i] == 0 ? "success" : "fail");
-        if (response[i] == 0) seq
-          caches[i].start(0,0);
-          caches[i].matching(0,tagged StoreConditional {mask: 1, data: 1});
-          action
-            let x <- caches[i].success;
-            $display(cycle, " success: %b", x);
-            response[i] <= x ? 1 : 0;
-          endaction
-        endseq else
-          response[i] <= 0;
-      endseq
-    endseq;
-
-    unlock[i] = seq
-      caches[i].start(0,0);
-      caches[i].matching(0, tagged Store {data: 0, mask: 1});
-    endseq;
-
-    increment[i] = seq
-      caches[i].start(2,0);
-      caches[i].matching(1, Load);
-      read[i];
-
-      caches[i].start(1,0);
-      caches[i].matching(0, Load);
-      read[i];
-      $display(cycle, " counter %d: %d at %d", i, response[i], cycle);
-      caches[i].start(1,0);
-      caches[i].matching(0, tagged Store {data: response[i]+1, mask: 15});
-    endseq;
-  end
-
-  Stmt initCaches = seq noAction; endseq;
-  for (Integer i=0; i < nCache; i = i + 1) begin
-    initCaches = seq
-      caches[i].setSource(fromInteger(i));
-      initCaches;
-    endseq;
-  end
 
   Reg#(Bit#(32)) counter <- mkReg(0);
 
-  Stmt main = seq noAction; endseq;
+  Vector#(NCache, Bit#(SourceW)) bsources = Vector::genWith(fromInteger);
+  Vector#(NCache, TestBCache) caches <- mapM(mkTestBCache, bsources);
+
+  Vector#(MSHR, Bit#(SourceW)) nbsources = Vector::genWith(fromInteger);
+  nbsources = Vector::map(add(fromInteger(nCache)), nbsources);
+  let nbcache <- mkTestNBCache(append(take(nbsources),nbsources));
+
+  function Bit#(0) rootSink(Bit#(SinkW) sink) = 0;
+  function Bit#(0) rootAddr(Bit#(AddrW) addr) = 0;
+  function Bit#(TLog#(TAdd#(NCache,MSHR))) rootSource(Bit#(SourceW) source) =
+    truncate(min(fromInteger(nCache),source));
+
+  let conf = XBarConf{
+    bce: True,
+    rootSink: rootSink,
+    rootSource: rootSource,
+    rootAddr: rootAddr
+  };
+
+  XBar#(1, TAdd#(NCache,MSHR), AddrW, DataW, SizeW, SourceW, SinkW) xbar <- mkXBar(conf);
+
+  mkConnection(xbar.slaves[nCache], nbcache);
+  mkConnection(xbar.masters[0], slave);
   for (Integer i=0; i < nCache; i = i + 1) begin
-    main = seq
-      par
-        main;
-        seq
-          while (True) seq
-            lock[i];
-            increment[i];
-            doAssert(counter == response[i], "ERROR!");
-            counter <= counter + 1;
-            unlock[i];
-            //delay(100);
-          endseq
-        endseq
-      endpar
-    endseq;
+    mkConnection(xbar.slaves[i], caches[i].master);
+
+    rule incr;
+      caches[i].incr;
+      counter <= counter + 1;
+    endrule
+
+    rule readCounter;
+      caches[i].readCounter(counter);
+    endrule
   end
 
-  Stmt stmt = seq
-    initCaches;
-    main;
-    $finish;
-  endseq;
+  function Bit#(SourceW) repr(Bit#(SourceW) source);
+    return source >= fromInteger(nCache) ? fromInteger(nCache) : source;
+  endfunction
 
-  mkAutoFSM(stmt);
+  let rom_controller <- mkTLBram(rom);
+  mkTileLinkClientFSM(
+    0,
+    logSize,
+    master,
+    rom_controller,
+    repr,
+    append(vec(fromInteger(nCache)),bsources)
+  );
 endmodule

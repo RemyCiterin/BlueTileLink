@@ -3,6 +3,8 @@ import RegFile :: *;
 import Assert :: *;
 import FIFOF :: *;
 
+typedef Bit#(TLog#(n)) Token#(numeric type n);
+
 typedef Bit#(TMul#(n,8)) Byte#(numeric type n);
 
 instance StringLiteral#(Fmt);
@@ -239,8 +241,11 @@ function Bit#(size) rotateLeft(Bit#(size) x, Bit#(TLog#(size)) a);
   // x >> b = {0, ..., 0, x[size-1], ..., x[b]}
   // And we want 1+(size-1-a) to be equal to b, so b=size-a
 
-  Bit#(TLog#(size)) b = fromInteger(valueOf(size) - 1) - a + 1;
-  return (x << a) | (x >> b);
+  if (valueOf(size) < 2) return x;
+  else begin
+    Bit#(TLog#(size)) b = fromInteger(valueOf(size) - 1) - a + 1;
+    return (x << a) | (x >> b);
+  end
 endfunction
 
 function Bit#(size) rotateRight(Bit#(size) x, Bit#(TLog#(size)) a);
@@ -249,8 +254,11 @@ function Bit#(size) rotateRight(Bit#(size) x, Bit#(TLog#(size)) a);
   // x << b = {x[size-1-b], ..., x[0], 0, ..., 0}
   // And we want 1+(size-1-b) to be equal to a, so b = size-a
 
-  Bit#(TLog#(size)) b = fromInteger(valueOf(size) - 1) - a + 1;
-  return (x >> a) | (x << b);
+  if (valueOf(size) < 2) return x;
+  else begin
+    Bit#(TLog#(size)) b = fromInteger(valueOf(size) - 1) - a + 1;
+    return (x >> a) | (x << b);
+  end
 endfunction
 
 // return the index of the less significant one

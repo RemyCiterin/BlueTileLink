@@ -260,9 +260,9 @@ module mkBypassFifo(Fifo#(n, t)) provisos(Bits#(t, size_t));
   method deq = fifo.deq;
 endmodule
 
-// Return a FifoO that never return any output
-function FifoO#(t) nullFifoO provisos(Bits#(t,tW));
-  return interface FifoO;
+// Return a Fifo that never accept/return any input/output
+function Fifo#(n, t) nullFifo provisos(Bits#(t,tW));
+  return interface Fifo;
     method Action deq if (False);
       noAction;
     endmethod
@@ -272,16 +272,21 @@ function FifoO#(t) nullFifoO provisos(Bits#(t,tW));
     endmethod
 
     method Bool canDeq = False;
-  endinterface;
-endfunction
 
-// Return a FifoI that never accept any input
-function FifoI#(t) nullFifoI provisos(Bits#(t,tW));
-  return interface FifoI;
     method Action enq(t _in) if (False);
       noAction;
     endmethod
 
     method Bool canEnq = False;
   endinterface;
+endfunction
+
+// Return a FifoO that never return any output
+function FifoO#(t) nullFifoO provisos(Bits#(t,tW));
+  return toFifoO((Fifo#(0,t))'(nullFifo));
+endfunction
+
+// Return a FifoI that never accept any input
+function FifoI#(t) nullFifoI provisos(Bits#(t,tW));
+  return toFifoI((Fifo#(0,t))'(nullFifo));
 endfunction

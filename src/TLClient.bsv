@@ -378,7 +378,7 @@ module mkProbeFSM#(
   Bit#(sizeW) logDataW = fromInteger(valueOf(TLog#(dataW)));
 
   Reg#(Bit#(addrW)) address <- mkReg(?);
-  Reg#(Bool) exc <- mkReg(?);
+  Reg#(Bool) exc <- mkReg(True);
 
   Reg#(Bit#(nSource)) toSend <- mkReg(0);
   Reg#(Bit#(nSource)) toReceive <- mkReg(0);

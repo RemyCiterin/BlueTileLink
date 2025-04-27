@@ -46,17 +46,18 @@ interface AcquireFSM#(type indexT, `TL_ARGS_DECL);
   method Action acquireBlock(Grow grow, indexT idx, Bit#(addrW) addr);
   method Action acquirePerms(Grow grow, Bit#(addrW) addr);
   method ActionValue#(TLPerm) acquireAck();
+  method Bool canAcquireAck;
 
   // Return if their is currently an acquire request
   method Bool active;
 
-  // Return the address of the acquire request, is it exist
+  // Return the address of the current (or last) acquire sequence
   method Bit#(addrW) address;
 
   // Return if the grant sequence already started
   method Bool grant;
 
-  // Return the requested transition permission of the current request
+  // Return the requested transition permission of the current (or last) request
   method Grow grow;
 endinterface
 
@@ -207,6 +208,8 @@ module mkAcquireFSM
     return perm;
   endmethod
 
+  method Bool canAcquireAck = started && valid && size == 0;
+
   method Bool active = valid;
   method Bit#(addrW) address = addrReg;
   method Bool grant = grantStarted;
@@ -338,7 +341,7 @@ interface ReleaseFSM#(type indexT, `TL_ARGS_DECL);
   // Return if their is currently a transfers
   method Bool active;
 
-  // Return the address of the current transfers if it exists
+  // The address of the current (or last) release sequence
   method Bit#(addrW) address;
 
   // Return the reduction of the current transfers if it exists

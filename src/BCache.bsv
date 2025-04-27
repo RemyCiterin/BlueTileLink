@@ -190,7 +190,7 @@ module mkBCacheCore
 
     doAssert(perm >= info.perm, "Receive smaller permission than needed");
 
-    perm = needPermT(info.op) && op != LoadReserve ? D : perm;
+    perm = needPermT(info.op) && info.op != LoadReserve ? D : perm;
     tagRam[info.way].write(index, info.tag);
     permRam[info.way].write(index, perm);
 

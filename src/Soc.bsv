@@ -12,6 +12,7 @@ import TLClient :: *;
 import TLBram :: *;
 
 import TLTypes :: *;
+import MSHR :: *;
 
 module mkCPU(Empty);
 endmodule
@@ -76,8 +77,12 @@ module mkCPU_SIM(Empty);
 
   Vector#(NCache, Bit#(SourceW)) sources = Vector::genWith(fromInteger);
 
+  function Bit#(SourceW) repr(Bit#(SourceW) source);
+    return source;
+  endfunction
+
   let rom_controller <- mkTLBram(rom);
-  mkTileLinkClientFSM(0, logSize, master, rom_controller, sources);
+  mkTileLinkClientFSM(0, logSize, master, rom_controller, repr, sources);
 
   Vector#(NCache, Reg#(Bit#(32))) response <- replicateM(mkReg(0));
 

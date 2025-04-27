@@ -114,6 +114,7 @@ module mkTileLinkClientFSM#(
     Bit#(sizeW) logSize,
     TLMaster#(`TL_ARGS) master,
     TLSlave#(addrW, dataW, sizeW, sinkW, 0) slave,
+    function Bit#(sourceW) repr(Bit#(sourceW) source),
     Vector#(nSource, Bit#(sourceW)) sources
   ) (Empty) provisos (Alias#(Bit#(TAdd#(1, TLog#(nSource))), sourceIdx));
 
@@ -187,7 +188,7 @@ module mkTileLinkClientFSM#(
 
     Bit#(nSource) srcs = -1;
     for (Integer i=0; i < valueOf(nSource); i = i + 1) begin
-      if (sources[i] == msg.source) srcs[i] = 0;
+      if (sources[i] == repr(msg.source)) srcs[i] = 0;
     end
 
     if (numSource > 1) begin

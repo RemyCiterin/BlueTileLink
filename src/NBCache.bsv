@@ -93,12 +93,9 @@ module mkNBCacheCore#(
     allowLookup <= !mshr.canFree;
   endrule
 
-  // "lookupProbe" have the priority over "lookup" to ensure forward progress
-  Wire#(Bool) startProbe <- mkDWire(False);
   rule lookupProbe if (state[1] == Idle && allowLookup);
     match {.addr, .perm} <- mshr.probeStart();
     match {.tag, .idx, .off} = conf.decode(addr);
-    startProbe <= True;
 
     probeAddr <= addr;
     probePerm <= perm;
@@ -157,7 +154,7 @@ module mkNBCacheCore#(
   endrule
 
   method Action lookup(Bit#(indexW) idx, Bit#(offsetW) off)
-    if (state[1] == Idle && allowLookup && !startProbe);
+    if (state[1] == Idle && allowLookup);
     action
       mshr.start;
       index <= idx;

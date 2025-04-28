@@ -24,6 +24,8 @@ interface Mshr
   method Action allocate(Transaction#(`TL_ARGS) tr, Bit#(indexW) idx);
 
   method ActionValue#(Tuple2#(Bit#(indexW),TLPerm)) free;
+
+  (* always_ready *)
   method Bool canFree;
 
   method Action setSource(Bit#(sourceW) source);
@@ -65,8 +67,6 @@ module mkMshr#(
   method Action allocate(Transaction#(`TL_ARGS) tr, Bit#(indexW) idx);
     action
       if (tr.next_perm == D) tr.next_perm = T;
-
-      $display("start transaction ", fshow(tr));
 
       if (state == Idle) begin
         transaction <= tr;
@@ -127,6 +127,10 @@ interface MshrFile
   // Inform the core that a transaction finish
   method ActionValue#(Tuple3#(Token#(mshr),Bit#(indexW),TLPerm)) free;
 
+  // Return if a free is possible
+  (* always_ready *)
+  method Bool canFree;
+
   /*** Initialisation ***/
   // The first entry is used as a source for release/probe requests
   method Action setSources(Vector#(TAdd#(1,mshr),Bit#(sourceW)) sources);
@@ -161,9 +165,9 @@ module mkMshrFile#(
   Vector#(mshr, Mshr#(indexW,`TL_ARGS)) mshrs <- replicateM(mkMshr(logSize, slave, bram, releaseM));
 
   // Static scheduler to free any ready Mshr
-  Bit#(mshr) canFree;
+  Bit#(mshr) freeMask;
   for (Integer i=0; i < valueOf(mshr); i = i + 1) begin
-    canFree[i] = mshrs[i].canFree ? 1 : 0;
+    freeMask[i] = mshrs[i].canFree ? 1 : 0;
   end
 
   Ehr#(2,Bit#(mshr)) reserved <- mkEhr(0);
@@ -205,12 +209,14 @@ module mkMshrFile#(
   endmethod
 
   method ActionValue#(Tuple3#(Token#(mshr),Bit#(indexW),TLPerm)) free
-    if (firstOneFrom(canFree,0) matches tagged Valid .i);
+    if (firstOneFrom(freeMask,0) matches tagged Valid .i);
     match {.idx, .perm} <- mshrs[i].free;
     reserved[0][i] <= 0;
 
     return tuple3(i,idx,perm);
   endmethod
+
+  method canFree = freeMask != 0;
 
   interface TLMaster master;
     interface channelA = toFifoO(fifoA);

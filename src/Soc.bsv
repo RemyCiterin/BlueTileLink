@@ -41,8 +41,8 @@ module mkTestNBCache#(Vector#(TAdd#(MSHR,1), Bit#(SourceW)) sources)
   function Tuple3#(Bit#(20),Bit#(6),Bit#(4)) decode(Bit#(32) addr) =
     tuple3(addr[31:12], addr[11:6], addr[5:2]);
 
-  NBCacheCore#(MSHR, 2, Bit#(20), Bit#(6), Bit#(4), AddrW, DataW, SizeW, SourceW, SinkW) cache
-    <- mkNBCacheCore(NBCacheConf{encode: encode, decode: decode});
+  NBCacheCore#(MSHR, 2, Bit#(20), Bit#(6), Bit#(4), AddrW, DataW, SizeW, SourceW, SinkW)
+    cache <- mkNBCacheCore(NBCacheConf{encode: encode, decode: decode});
 
   rule init;
     $display(fshow(sources));
@@ -54,14 +54,15 @@ module mkTestNBCache#(Vector#(TAdd#(MSHR,1), Bit#(SourceW)) sources)
     $display("free %d", m);
   endrule
 
-  Vector#(MSHR, Reg#(Maybe#(Token#(MSHR)))) mshr <- replicateM(mkReg(?));
-  Vector#(MSHR, Reg#(Bit#(32))) response <- replicateM(mkReg(?));
+  // We use more addresses than the number of MSHR for this test
+  Vector#(32, Reg#(Maybe#(Token#(MSHR)))) mshr <- replicateM(mkReg(?));
+  Vector#(32, Reg#(Bit#(32))) response <- replicateM(mkReg(?));
 
-  function Stmt read(Token#(MSHR) id, Bit#(20) tag, Bit#(6) index, Bit#(4) offset) = seq
+  function Stmt read(Token#(32) id, Bit#(20) tag, Bit#(6) index, Bit#(4) offset) = seq
     mshr[id] <= Valid(?);
 
     while (mshr[id] != Invalid) seq
-      cache.start(index,offset);
+      cache.lookup(index,offset);
       action
         let m <- cache.matching(tag,True,?,?);
         mshr[id] <= m;
@@ -71,13 +72,36 @@ module mkTestNBCache#(Vector#(TAdd#(MSHR,1), Bit#(SourceW)) sources)
     action
       let r <- cache.response;
       response[id] <= r;
+      $display("%h == mem[%h]", r, {tag,index,offset,2'b0});
     endaction
+  endseq;
+
+  function Stmt
+    write(Token#(32) id, Bit#(20) tag, Bit#(6) index, Bit#(4) offset, Bit#(32) data) = seq
+    mshr[id] <= Valid(?);
+
+    while (mshr[id] != Invalid) seq
+      cache.lookup(index,offset);
+      action
+        let m <- cache.matching(tag,False,data,-1);
+        mshr[id] <= m;
+
+        if (m == Invalid) $display("mem[%h] <= %h", {tag,index,offset,2'b0}, data);
+      endaction
+    endseq
   endseq;
 
   Stmt main = seq
     par
+      write(0,0,0,0,42);
+      write(1,1,0,0,41);
+      write(2,2,0,0,43);
+    endpar
+
+    par
       read(0,0,0,0);
-      read(1,0,0,0);
+      read(1,1,0,0);
+      read(2,2,0,0);
     endpar
 
     while (True) noAction;
@@ -97,7 +121,8 @@ endinterface
 
 (* synthesize *)
 module mkTestBCache#(Bit#(SourceW) source) (TestBCache);
-  Fifo#(2, ChannelA#(AddrW, DataW, SizeW, SourceW, SinkW)) fifoA <- mkFifo;
+  // Ensure that we always have enough ressources for the next cache miss
+  Fifo#(MSHR, ChannelA#(AddrW, DataW, SizeW, SourceW, SinkW)) fifoA <- mkFifo;
   Fifo#(2, ChannelB#(AddrW, DataW, SizeW, SourceW, SinkW)) fifoB <- mkFifo;
   Fifo#(2, ChannelC#(AddrW, DataW, SizeW, SourceW, SinkW)) fifoC <- mkFifo;
   Fifo#(2, ChannelD#(AddrW, DataW, SizeW, SourceW, SinkW)) fifoD <- mkFifo;
@@ -143,12 +168,12 @@ module mkTestBCache#(Bit#(SourceW) source) (TestBCache);
     response <= 0;
 
     while (response == 0) seq
-      cache.start(0,0);
+      cache.lookup(0,0);
       cache.matching(0, LoadReserve);
       read;
       $display(cycle, " try %d is %s", source, response == 0 ? "success" : "fail");
       if (response == 0) seq
-        cache.start(0,0);
+        cache.lookup(0,0);
         cache.matching(0,tagged StoreConditional {mask: 1, data: 1});
         action
           let x <- cache.success;
@@ -161,20 +186,20 @@ module mkTestBCache#(Bit#(SourceW) source) (TestBCache);
   endseq;
 
   Stmt unlock = seq
-    cache.start(0,0);
+    cache.lookup(0,0);
     cache.matching(0, tagged Store {data: 0, mask: 1});
   endseq;
 
   Stmt increment = seq
-    cache.start(2,0);
+    cache.lookup(2,0);
     cache.matching(1, Load);
     read;
 
-    cache.start(1,0);
+    cache.lookup(1,0);
     cache.matching(0, Load);
     read;
     $display(cycle, " counter %d: %d at %d", source, response, cycle);
-    cache.start(1,0);
+    cache.lookup(1,0);
     cache.matching(0, tagged Store {data: response+1, mask: 15});
   endseq;
 
@@ -192,7 +217,7 @@ module mkTestBCache#(Bit#(SourceW) source) (TestBCache);
     endseq
   endseq;
 
-  mkAutoFSM(main);
+  //mkAutoFSM(main);
 
   method incr = incrQ.deq;
 

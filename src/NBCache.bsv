@@ -19,7 +19,7 @@ interface NBCacheCore
   interface TLMaster#(`TL_ARGS) master;
 
   /*** Stage 1 ***/
-  method Action start(indexT index, offsetT offset);
+  method Action lookup(indexT index, offsetT offset);
 
   /*** Stage 2 ***/
   // Return Invalid in case of success, overwise return the MSHR that
@@ -45,14 +45,20 @@ typedef struct {
   function Tuple3#(Bit#(tagW),Bit#(indexW),Bit#(offsetW)) decode(Bit#(addrW) tag) decode;
 } NBCacheConf#(numeric type tagW, numeric type indexW, numeric type offsetW, `TL_ARGS_DECL);
 
+typedef enum {
+  Idle, Lookup, ProbeLookup
+} NBCacheState deriving(Bits, Eq, FShow);
+
 module mkNBCacheCore#(
     NBCacheConf#(tagW,indexW,offsetW,`TL_ARGS) conf
-  )(NBCacheCore#(mshr,way,Bit#(tagW),Bit#(indexW),Bit#(offsetW),`TL_ARGS));
+  ) (NBCacheCore#(mshr,way,Bit#(tagW),Bit#(indexW),Bit#(offsetW),`TL_ARGS));
 
   Vector#(way, Bram#(Bit#(indexW), TLPerm)) permRam <- replicateM(mkBramInit(N));
   Vector#(way, Bram#(Bit#(indexW), Bit#(tagW))) tagRam <- replicateM(mkBram());
 
   Bit#(sizeW) logSize = fromInteger(valueOf(offsetW) + valueOf(TLog#(dataW)));
+
+  Ehr#(2, NBCacheState) state <- mkEhr(Idle);
 
   let bram <- mkBramBE();
   Vector#(2, BramBE#(Bit#(TAdd#(TLog#(way), TAdd#(indexW, offsetW))), dataW)) vbram
@@ -79,12 +85,20 @@ module mkNBCacheCore#(
   Reg#(Bit#(addrW)) probeAddr <- mkReg(?);
   Reg#(TLPerm) probePerm <- mkReg(?);
 
-  rule receiveProbe;
+  Wire#(Bool) allowLookup <- mkWire;
+
+  rule canFreeRl;
+    allowLookup <= !mshr.canFree;
+  endrule
+
+  rule lookupProbe if (state[1] == Idle && allowLookup);
     match {.addr, .perm} <- mshr.probeStart();
     match {.tag, .idx, .off} = conf.decode(addr);
 
     probeAddr <= addr;
     probePerm <= perm;
+
+    state[1] <= ProbeLookup;
 
     for (Integer i=0; i < valueOf(way); i = i + 1) begin
       permRam[i].read(idx);
@@ -92,11 +106,13 @@ module mkNBCacheCore#(
     end
   endrule
 
-  rule matchProbe;
+  rule matchProbe if (state[0] == ProbeLookup);
     match {.t, .idx, .off} = conf.decode(probeAddr);
     Bit#(tagW) tag = ?;
     Token#(way) way = ?;
     TLPerm perm = N;
+
+    state[0] <= Idle;
 
     for (Integer i=0; i < valueOf(way); i = i + 1) begin
       if (tagRam[i].response == t && permRam[i].response > N) begin
@@ -135,11 +151,13 @@ module mkNBCacheCore#(
     mshr.probeFinish();
   endrule
 
-  method Action start(Bit#(indexW) idx, Bit#(offsetW) off);
+  method Action lookup(Bit#(indexW) idx, Bit#(offsetW) off)
+    if (state[1] == Idle && allowLookup);
     action
       mshr.start;
       index <= idx;
       offset <= off;
+      state[1] <= Lookup;
 
       for (Integer i=0; i < valueof(way); i = i + 1) begin
         permRam[i].read(idx);
@@ -149,7 +167,8 @@ module mkNBCacheCore#(
   endmethod
 
   method ActionValue#(Maybe#(Token#(mshr)))
-    matching(Bit#(tagW) t, Bool read, Byte#(dataW) data, Bit#(dataW) mask);
+    matching(Bit#(tagW) t, Bool read, Byte#(dataW) data, Bit#(dataW) mask)
+    if (state[0] == Lookup);
 
     Token#(way) way = randomWay;
 
@@ -161,6 +180,8 @@ module mkNBCacheCore#(
       permRam[i].deq;
       tagRam[i].deq;
     end
+
+    state[0] <= Idle;
 
     Bit#(tagW) tag = tagRam[way].response;
     TLPerm perm = tag == t ? permRam[way].response : N;
@@ -179,7 +200,6 @@ module mkNBCacheCore#(
       return Valid(m);
     end else if ((read && perm < B) || (!read && perm < T)) begin
       let m <- mshr.allocate(tr,{way,index,0});
-      $display("allocate mshr: %d", m);
       permRam[way].write(index,N);
       tagRam[way].write(index,t);
       return Valid(m);
@@ -196,7 +216,7 @@ module mkNBCacheCore#(
     return dataRam.response;
   endmethod
 
-  method ActionValue#(Token#(mshr)) free;
+  method ActionValue#(Token#(mshr)) free if (state[0] == Idle);
     match {.m, .idx, .perm} <- mshr.free;
     match {.w,.i} = decodeIndex(idx);
     permRam[w].write(i,perm);

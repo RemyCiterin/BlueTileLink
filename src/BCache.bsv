@@ -53,7 +53,7 @@ function Bool isStoreConditional(CacheOp#(dataW) op);
 endfunction
 
 interface BCacheCore#(type wayT, type tagT, type indexT, type offsetT, `TL_ARGS_DECL);
-  method Action start(indexT index, offsetT offset);
+  method Action lookup(indexT index, offsetT offset);
   method Action matching(tagT tag, CacheOp#(dataW) op);
   method ActionValue#(Byte#(dataW)) response;
   method ActionValue#(Bool) success;
@@ -206,7 +206,7 @@ module mkBCacheCore
     endcase
   endrule
 
-  rule receiveProbe if (state[1] == Idle || state[1] == Acquire && reservedTimer[1] == 0);
+  rule lookupProbe if (state[1] == Idle || state[1] == Acquire && reservedTimer[1] == 0);
     match {.addr, .perm} <- releaseM.probeStart();
 
     match {.tag, .idx, .off} = conf.decode(addr);
@@ -274,7 +274,7 @@ module mkBCacheCore
     state[0] <= nextState;
   endrule
 
-  method Action start(Bit#(indexW) idx, Bit#(offsetW) off)
+  method Action lookup(Bit#(indexW) idx, Bit#(offsetW) off)
     if (state[1] == Idle);
     action
       index <= idx;

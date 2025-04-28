@@ -26,52 +26,52 @@ module mkSizedBram#(Integer size) (Bram#(addrT, dataT))
   let wrPort = bram.a;
   let rdPort = bram.b;
 
-  Ehr#(2, Maybe#(dataT)) rdData <- mkEhr(Invalid);
-  Ehr#(2, Bool) valid <- mkEhr(False);
-  Ehr#(2, addrT) rdAddr <- mkEhr(?);
+  FIFOF#(Maybe#(dataT)) rsp <- mkPipelineFIFOF;
 
-  Wire#(Bool) wrValid <- mkDWire(False);
-  Wire#(addrT) wrAddr <- mkDWire(?);
-  Wire#(dataT) wrData <- mkDWire(?);
+  // currentData and currentAddr contain the arguments of the last write
+  RWire#(dataT) currentWrData <- mkRWire;
+  RWire#(addrT) currentWrAddr <- mkRWire;
+  let wrAddr = fromMaybe(?, currentWrAddr.wget);
+  let wrData = fromMaybe(?, currentWrData.wget);
+  let wrValid = isJust(currentWrAddr.wget);
+
+  RWire#(addrT) currentRdAddr <- mkRWire;
+  let rdAddr = fromMaybe(?, currentRdAddr.wget);
+  let rdValid = isJust(currentRdAddr.wget);
 
   (* no_implicit_conditions, fire_when_enabled *)
   rule block_ram_apply_write if (wrValid);
     wrPort.put(True, wrAddr, wrData);
+  endrule
 
-    if (wrAddr == rdAddr[1])
-      rdData[1] <= Valid(wrData);
+  (* fire_when_enabled *)
+  rule block_ram_apply_read if (rdValid && rsp.notFull());
+    let data = (wrValid && wrAddr == rdAddr ? Valid(wrData) : Invalid);
+    rdPort.put(False, rdAddr, ?);
+    rsp.enq(data);
   endrule
 
   method Action write(addrT addr, dataT data);
-    wrValid <= True;
-    wrAddr <= addr;
-    wrData <= data;
+    currentWrAddr.wset(addr);
+    currentWrData.wset(data);
   endmethod
 
-  method Action read(addrT addr) if (!valid[1]);
-    rdPort.put(False, addr, ?);
-    rdData[0] <= Invalid;
-    rdAddr[0] <= addr;
-    valid[1] <= True;
+  method Action read(addrT addr) if (rsp.notFull());
+    currentRdAddr.wset(addr);
   endmethod
 
-  method Bool canRead = !valid[1];
+  method Bool canRead = rsp.notFull;
 
-  method dataT response if (valid[0]);
-    case (rdData[0]) matches
+  method dataT response if (rsp.notEmpty);
+    case (rsp.first) matches
       tagged Valid .data : return data;
       tagged Invalid: return rdPort.read;
     endcase
   endmethod
 
-  method canDeq = valid[0];
+  method canDeq = rsp.notEmpty;
 
-  method Action deq if (valid[0]);
-    action
-      valid[0] <= False;
-    endaction
-  endmethod
-
+  method deq = rsp.deq;
 endmodule
 
 // return an initialized block of ram
@@ -146,64 +146,65 @@ module mkSizedBramVec#(Integer size) (BramVec#(addrT, n, dataT))
   Vector#(n, BRAM_DUAL_PORT#(addrT, dataT)) bram <-
     replicateM(mkBRAMCore2(size, False));
 
-  Ehr#(2, addrT) rdAddr <- mkEhr(?);
-  Ehr#(2, Bit#(n)) rdMask <- mkEhr(0);
-  Reg#(Vector#(n,dataT)) rdData <- mkReg(?);
-  Ehr#(2, Bool) valid <- mkEhr(False);
+  FIFOF#(Tuple2#(Vector#(n, dataT), Bit#(n))) rsp <- mkPipelineFIFOF;
 
-  Wire#(Bool) wrValid <- mkDWire(False);
-  Wire#(Vector#(n,dataT)) wrData <- mkDWire(?);
-  Wire#(Bit#(n)) wrMask <- mkDWire(?);
-  Wire#(addrT) wrAddr <- mkDWire(?);
+  // currentData and currentAddr contain the arguments of the last write
+  RWire#(addrT) currentWrAddr <- mkRWire;
+  RWire#(Bit#(n)) currentWrMask <- mkRWire;
+  RWire#(Vector#(n, dataT)) currentWrData <- mkRWire;
+  let wrAddr = fromMaybe(?, currentWrAddr.wget);
+  let wrData = fromMaybe(?, currentWrData.wget);
+  let wrMask = fromMaybe(?, currentWrMask.wget);
+  let wrValid = isJust(currentWrAddr.wget);
+
+  RWire#(addrT) currentRdAddr <- mkRWire;
+  let rdAddr = fromMaybe(?, currentRdAddr.wget);
+  let rdValid = isJust(currentRdAddr.wget);
 
   (* no_implicit_conditions, fire_when_enabled *)
   rule block_ram_apply_write if (wrValid);
     for (Integer i=0; i < valueOf(n); i = i + 1) if (wrMask[i] == 1) begin
       bram[i].a.put(True, wrAddr, wrData[i]);
     end
+  endrule
 
-    if (wrAddr == rdAddr[1]) begin
-      rdMask[1] <= wrMask;
-      rdData <= wrData;
+  (* fire_when_enabled *)
+  rule block_ram_apply_read if (rdValid && rsp.notFull());
+    let data = tuple2(wrData, wrValid && wrAddr == rdAddr ? wrMask : 0);
+
+    for (Integer i=0; i < valueOf(n); i = i + 1) begin
+      bram[i].b.put(False, rdAddr, ?);
     end
+
+    rsp.enq(data);
   endrule
 
   method Action write(addrT addr, Vector#(n, dataT) data, Bit#(n) mask);
-    wrValid <= True;
-    wrData <= data;
-    wrMask <= mask;
-    wrAddr <= addr;
+    currentWrAddr.wset(addr);
+    currentWrData.wset(data);
+    currentWrMask.wset(mask);
   endmethod
 
-  method Action read(addrT addr) if (!valid[1]);
-    for (Integer i=0; i < valueOf(n); i = i + 1) begin
-      bram[i].b.put(False, addr, ?);
-    end
-
-    rdAddr[0] <= addr;
-    valid[1] <= True;
-    rdMask[0] <= 0;
+  method Action read(addrT addr) if (rsp.notFull());
+    currentRdAddr.wset(addr);
   endmethod
 
-  method Bool canRead = !valid[1];
+  method Bool canRead = rsp.notFull;
 
-  method Vector#(n, dataT) response if (valid[0]);
-    Vector#(n, dataT) ret = rdData;
+  method Vector#(n, dataT) response if (rsp.notEmpty);
+    match {.data, .mask} = rsp.first;
+    Vector#(n, dataT) ret = data;
 
     for (Integer i=0; i < valueOf(n); i = i + 1) begin
-      if (rdMask[0][i] == 0) ret[i] = bram[i].b.read;
+      if (mask[i] == 0) ret[i] = bram[i].b.read;
     end
 
     return ret;
   endmethod
 
-  method canDeq = valid[0];
+  method canDeq = rsp.notEmpty;
 
-  method Action deq;
-    action
-      valid[0] <= False;
-    endaction
-  endmethod
+  method deq = rsp.deq;
 endmodule
 
 // return an initialized block of ram

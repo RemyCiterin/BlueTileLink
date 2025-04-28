@@ -71,11 +71,11 @@ module mkAcquireFSM
   #(Bit#(sizeW) logSize, Bram#(Bit#(indexW), Byte#(dataW)) bram, TLSlave#(`TL_ARGS) slave)
   (AcquireFSM#(Bit#(indexW), `TL_ARGS));
 
+  MetaChannelD#(`TL_ARGS) metaD <- mkMetaChannelD(slave.channelD);
+  let channelD = metaD.channel;
+
   // Current index we use to write in `bram`
   Reg#(Bit#(indexW)) index <- mkReg(?);
-
-  // number of beats to receive before the end of the transfers
-  Reg#(Bit#(addrW)) size <- mkReg(?);
 
   Reg#(Bit#(sourceW)) source <- mkReg(?);
   Reg#(Bool) started <- mkReg(False);
@@ -83,7 +83,10 @@ module mkAcquireFSM
   // true if the module is doing an acquire transfers
   Reg#(Bool) valid <- mkReg(False);
 
-  Reg#(ChannelD#(`TL_ARGS)) channelD <- mkReg(?);
+  Reg#(Bool) last <- mkReg(False);
+
+  Reg#(Bit#(sinkW)) sink <- mkReg(?);
+
   Reg#(TLPerm) perm <- mkReg(?);
 
   Reg#(Bool) grantStarted <- mkReg(False);
@@ -92,66 +95,57 @@ module mkAcquireFSM
 
   rule receiveGrantData
     if (
-      slave.channelD.first.opcode matches tagged GrantData .p &&&
-      slave.channelD.first.source == source
+      channelD.first.opcode matches tagged GrantData .p &&&
+      channelD.first.source == source
     );
     doAssert(
-      slave.channelD.first.size == logSize,
+      channelD.first.size == logSize,
       "Grant responses must have the same size that their associated Acquire request"
     );
 
     if (verbose)
-      $display("Server: %d ", index, fshow(slave.channelD.first));
+      $display("Server: %d ", index, fshow(channelD.first));
 
-    slave.channelD.deq();
-    channelD <= slave.channelD.first;
+    channelD.deq();
     perm <= p == N ? N : p == T ? T : B;
 
-    bram.write(index, slave.channelD.first.data);
+    bram.write(index, channelD.first.data);
     grantStarted <= True;
 
-    size <= size - fromInteger(valueOf(dataW));
     index <= index + 1;
 
-    if (size == fromInteger(valueOf(dataW))) begin
-      slave.channelE.enq(ChannelE{
-        sink: slave.channelD.first.sink,
-        opcode: GrantAck
-      });
-    end
+    sink <= channelD.first.sink;
+
+    last <= metaD.last;
   endrule
 
   rule receiveGrant
     if (
-      slave.channelD.first.opcode matches tagged Grant .p &&&
-      slave.channelD.first.source == source
+      channelD.first.opcode matches tagged Grant .p &&&
+      channelD.first.source == source
     );
     doAssert(
-      slave.channelD.first.size == logSize,
+      channelD.first.size == logSize,
       "Grant responses must have the same size that their associated Acquire request"
     );
 
     doAssert(
-      !grantStarted && size == 1,
-      "Grant burst must contain only one message, otherwise use GrantData"
+      !last, "Grant burst must contain only one message, otherwise use GrantData"
     );
 
     if (verbose)
-      $display("Server: ", fshow(slave.channelD.first));
+      $display("Server: ", fshow(channelD.first));
 
-    slave.channelD.deq();
-    channelD <= slave.channelD.first;
+    channelD.deq();
     perm <= p == N ? N : p == T ? T : B;
 
     grantStarted <= True;
 
-    size <= 0;
     index <= index + 1;
 
-    slave.channelE.enq(ChannelE{
-      sink: slave.channelD.first.sink,
-      opcode: GrantAck
-    });
+    sink <= channelD.first.sink;
+
+    last <= metaD.last;
   endrule
 
   function Action doAcquire(OpcodeA opcode, Bit#(indexW) idx, Bit#(addrW) addr);
@@ -186,7 +180,7 @@ module mkAcquireFSM
   method Action acquirePerms(Grow grow, Bit#(addrW) addr)
     if (started && !valid);
     action
-      size <= 1; // magic number used for some assert
+      last <= False;
       doAcquire(AcquirePerms(grow), ?, addr);
       growReg <= grow;
     endaction
@@ -196,19 +190,24 @@ module mkAcquireFSM
     if (started && !valid);
     action
       doAcquire(AcquireBlock(grow), idx, addr);
-      size <= 1 << logSize;
       growReg <= grow;
     endaction
   endmethod
 
-  method ActionValue#(TLPerm) acquireAck
-    if (started && valid && size == 0);
+  method ActionValue#(TLPerm) acquireAck if (last);
     grantStarted <= False;
     valid <= False;
+    last <= False;
+
+    slave.channelE.enq(ChannelE{
+      opcode: GrantAck,
+      sink: sink
+    });
+
     return perm;
   endmethod
 
-  method Bool canAcquireAck = started && valid && size == 0;
+  method Bool canAcquireAck = started && valid && last;
 
   method Bool active = valid;
   method Bit#(addrW) address = addrReg;

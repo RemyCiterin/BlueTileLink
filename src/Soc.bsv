@@ -217,7 +217,7 @@ module mkTestBCache#(Bit#(SourceW) source) (TestBCache);
     endseq
   endseq;
 
-  //mkAutoFSM(main);
+  mkAutoFSM(main);
 
   method incr = incrQ.deq;
 

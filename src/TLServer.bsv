@@ -357,6 +357,7 @@ endmodule
 interface ReleaseFSM#(type indexT, `TL_ARGS_DECL);
   method Action setSource(Bit#(sourceW) source);
 
+  method Bool canProbe;
   method ActionValue#(Tuple2#(Bit#(addrW), TLPerm)) probeStart;
   method Action probeBlock(Reduce reduce, indexT idx);
   method Action probePerms(Reduce reduce);
@@ -429,6 +430,13 @@ module mkReleaseFSM
       return tuple2(msg.address, perm == T ? T : perm == B ? B : N);
     endactionvalue
   endfunction
+
+  method Bool canProbe;
+    if (slave.channelB.first.source == source && state[1] == IDLE)
+      return True;
+    else
+      return False;
+  endmethod
 
   method ActionValue#(Tuple2#(Bit#(addrW), TLPerm)) probeStart
     if (slave.channelB.first.source == source && state[1] == IDLE);

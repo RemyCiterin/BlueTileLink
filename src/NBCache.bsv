@@ -154,7 +154,7 @@ module mkNBCacheCore#(
   endrule
 
   method Action lookup(Bit#(indexW) idx, Bit#(offsetW) off)
-    if (state[1] == Idle && allowLookup);
+    if (state[1] == Idle && allowLookup && !mshr.canProbe);
     action
       mshr.start;
       index <= idx;

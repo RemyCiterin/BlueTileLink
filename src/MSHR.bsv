@@ -142,6 +142,7 @@ interface MshrFile
   method Action probeBlock(Reduce reduce, Bit#(indexW) idx);
   method Action probePerms(Reduce reduce);
   method Action probeFinish();
+  method Bool canProbe;
 
   method Bool needBusRd;
   method Bool needBusWr;
@@ -240,6 +241,7 @@ module mkMshrFile#(
     interface channelE = toFifoO(fifoE);
   endinterface
 
+  method canProbe = releaseM.canProbe;
   method probeStart = releaseM.probeStart;
   method probeBlock = releaseM.probeBlock;
   method probePerms = releaseM.probePerms;

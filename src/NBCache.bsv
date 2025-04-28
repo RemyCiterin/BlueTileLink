@@ -171,9 +171,10 @@ module mkNBCacheCore#(
     endaction
   endmethod
 
+  // TODO: improve the arbiter: we don't want to block if the request doesn't need the bram
   method ActionValue#(Maybe#(Token#(mshr)))
     matching(Bit#(tagW) t, Bool read, Byte#(dataW) data, Bit#(dataW) mask)
-    if (state[0] == Lookup);
+    if (state[0] == Lookup && !mshr.needBusRd && !mshr.needBusWr);
 
     Token#(way) way = randomWay;
 
@@ -200,7 +201,7 @@ module mkNBCacheCore#(
 
     // The request is blocked because a cache miss handling slot
     // already acquire this address, or use the same cache block
-    if (mshr.search(conf.encode(t,index,0),{way,index,0}) matches tagged Valid .m) begin
+    if (mshr.search(tr.next_addr,{way,index,0}) matches tagged Valid .m) begin
       mshr.stop;
       return Valid(m);
     end else if ((read && perm < B) || (!read && perm < T)) begin
@@ -221,7 +222,7 @@ module mkNBCacheCore#(
     return dataRam.response;
   endmethod
 
-  method ActionValue#(Token#(mshr)) free if (state[0] == Idle);
+  method ActionValue#(Token#(mshr)) free;
     match {.m, .idx, .perm} <- mshr.free;
     match {.w,.i} = decodeIndex(idx);
     permRam[w].write(i,perm);

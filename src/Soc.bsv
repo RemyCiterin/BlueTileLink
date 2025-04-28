@@ -81,7 +81,10 @@ module mkTestNBCache#(Vector#(TAdd#(MSHR,1), Bit#(SourceW)) sources)
     mshr[id] <= Valid(?);
 
     while (mshr[id] != Invalid) seq
-      cache.lookup(index,offset);
+      action
+        cache.lookup(index,offset);
+        $display("lookup %h", {tag,index,offset,2'b0});
+      endaction
       action
         let m <- cache.matching(tag,False,data,-1);
         mshr[id] <= m;

@@ -33,6 +33,7 @@ interface Mshr
   method Bool active;
   method Bit#(addrW) address;
   method Bit#(indexW) position;
+  method Bool needBus;
 endinterface
 
 typedef enum {
@@ -47,8 +48,8 @@ typedef enum {
 module mkMshr#(
     Bit#(sizeW) logSize,
     TLSlave#(`TL_ARGS) slave,
-    Bram#(Bit#(indexW), Byte#(dataW)) bram,
-    ReleaseFSM#(Bit#(indexW), `TL_ARGS) releaseM
+    ReleaseFSM#(Bit#(indexW), `TL_ARGS) releaseM,
+    Bram#(Bit#(indexW), Byte#(dataW)) bram
   ) (Mshr#(indexW, `TL_ARGS));
 
   AcquireFSM#(Bit#(indexW), `TL_ARGS) acquireM <- mkAcquireFSM(logSize, bram, slave);
@@ -97,6 +98,7 @@ module mkMshr#(
 
   method setSource = acquireM.setSource;
 
+  method Bool needBus = acquireM.needBus;
   method Bool canFree = state == Acquire && acquireM.canAcquireAck;
 
   method Bit#(addrW) address = transaction.next_addr;
@@ -140,6 +142,9 @@ interface MshrFile
   method Action probeBlock(Reduce reduce, Bit#(indexW) idx);
   method Action probePerms(Reduce reduce);
   method Action probeFinish();
+
+  method Bool needBusRd;
+  method Bool needBusWr;
 endinterface
 
 module mkMshrFile#(
@@ -162,7 +167,13 @@ module mkMshrFile#(
   endinterface;
 
   ReleaseFSM#(Bit#(indexW),`TL_ARGS) releaseM <- mkReleaseFSM(logSize, bram,slave);
-  Vector#(mshr, Mshr#(indexW,`TL_ARGS)) mshrs <- replicateM(mkMshr(logSize, slave, bram, releaseM));
+
+  Vector#(mshr, Mshr#(indexW,`TL_ARGS)) mshrs <- replicateM(mkMshr(logSize, slave, releaseM, bram));
+
+  Bool needWrite = False;
+  for (Integer i=0; i < valueOf(mshr); i = i + 1) begin
+    needWrite = needWrite || mshrs[i].needBus;
+  end
 
   // Static scheduler to free any ready Mshr
   Bit#(mshr) freeMask;
@@ -172,6 +183,9 @@ module mkMshrFile#(
 
   Ehr#(2,Bit#(mshr)) reserved <- mkEhr(0);
   Fifo#(1,Token#(mshr)) reservationQ <- mkPipelineFifo;
+
+  method needBusRd = releaseM.needBus;
+  method needBusWr = needWrite;
 
   method Action start if (firstOneFrom(~reserved[1],0) matches tagged Valid .i);
     action

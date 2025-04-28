@@ -51,6 +51,9 @@ interface AcquireFSM#(type indexT, `TL_ARGS_DECL);
   // Return if their is currently an acquire request
   method Bool active;
 
+  // For a potential bram bus arbiter
+  method Bool needBus;
+
   // Return the address of the current (or last) acquire sequence
   method Bit#(addrW) address;
 
@@ -75,7 +78,7 @@ module mkAcquireFSM
   let channelD = metaD.channel;
 
   // Current index we use to write in `bram`
-  Reg#(Bit#(indexW)) index <- mkReg(?);
+  Ehr#(2,Bit#(indexW)) index <- mkEhr(?);
 
   Reg#(Bit#(sourceW)) source <- mkReg(?);
   Reg#(Bool) started <- mkReg(False);
@@ -93,6 +96,17 @@ module mkAcquireFSM
   Reg#(Bit#(addrW)) addrReg <- mkReg(?);
   Reg#(Grow) growReg <- mkReg(?);
 
+  Wire#(Bool) needBusWire <- mkDWire(False);
+
+  rule arbiterRequest
+    if (
+      channelD.first.opcode matches tagged GrantData .* &&&
+      channelD.first.source == source
+    );
+
+    needBusWire <= True;
+  endrule
+
   rule receiveGrantData
     if (
       channelD.first.opcode matches tagged GrantData .p &&&
@@ -104,15 +118,15 @@ module mkAcquireFSM
     );
 
     if (verbose)
-      $display("Server: %d ", index, fshow(channelD.first));
+      $display("Server: %d ", index[0], fshow(channelD.first));
 
     channelD.deq();
     perm <= p == N ? N : p == T ? T : B;
 
-    bram.write(index, channelD.first.data);
+    bram.write(index[0], channelD.first.data);
     grantStarted <= True;
 
-    index <= index + 1;
+    index[0] <= index[0] + 1;
 
     sink <= channelD.first.sink;
 
@@ -141,8 +155,6 @@ module mkAcquireFSM
 
     grantStarted <= True;
 
-    index <= index + 1;
-
     sink <= channelD.first.sink;
 
     last <= metaD.last;
@@ -164,8 +176,8 @@ module mkAcquireFSM
         data: ?,
         mask: ?
       });
+      index[1] <= idx;
       valid <= True;
-      index <= idx;
     endaction
   endfunction
 
@@ -180,7 +192,6 @@ module mkAcquireFSM
   method Action acquirePerms(Grow grow, Bit#(addrW) addr)
     if (started && !valid);
     action
-      last <= False;
       doAcquire(AcquirePerms(grow), ?, addr);
       growReg <= grow;
     endaction
@@ -212,6 +223,7 @@ module mkAcquireFSM
   method Bool active = valid;
   method Bit#(addrW) address = addrReg;
   method Bool grant = grantStarted;
+  method needBus = needBusWire;
   method Grow grow = growReg;
 endmodule
 
@@ -222,6 +234,9 @@ interface BurstFSM#(type indexT, `TL_ARGS_DECL);
 
   method Action startBurst(OpcodeC opcode, indexT idx, Bit#(addrW) addr, Bit#(sizeW) size);
   method Action finishBurst();
+
+  // For a potential bram bus arbiter
+  method Bool needBus;
 endinterface
 
 module mkBurstFSM
@@ -251,6 +266,8 @@ module mkBurstFSM
 
   Ehr#(2, Bool) valid <- mkEhr(False);
 
+  Wire#(Bool) needBusWire <- mkDWire(False);
+
   rule releaseStep if (valid[0] && size[0] > 0);
     let data = bram.response();
     bram.deq();
@@ -261,6 +278,16 @@ module mkBurstFSM
     slave.channelC.enq(msg);
     size[0] <= size[0] - fromInteger(valueOf(dataW));
     index[0] <= index[0] + 1;
+  endrule
+
+  rule arbiterRl1
+    if (message.opcode matches tagged ReleaseData .* &&& size[1] > 0);
+    needBusWire <= True;
+  endrule
+
+  rule arbiterRl2
+    if (message.opcode matches tagged ProbeAckData .* &&& size[1] > 0);
+    needBusWire <= True;
   endrule
 
   rule ramRequestRelease
@@ -323,6 +350,8 @@ module mkBurstFSM
       endcase
     endaction
   endmethod
+
+  method needBus = needBusWire;
 endmodule
 
 interface ReleaseFSM#(type indexT, `TL_ARGS_DECL);
@@ -345,6 +374,9 @@ interface ReleaseFSM#(type indexT, `TL_ARGS_DECL);
 
   // Return the reduction of the current transfers if it exists
   method Reduce reduce;
+
+  // For a potential bram bus arbiter
+  method Bool needBus;
 endinterface
 
 typedef enum {
@@ -486,4 +518,5 @@ module mkReleaseFSM
   method active = state[1] != IDLE && state[1] != INIT;
   method reduce = reduceReg;
   method address = addrReg;
+  method needBus = burstM.needBus;
 endmodule

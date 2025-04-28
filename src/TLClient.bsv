@@ -267,6 +267,10 @@ module mkTileLinkClientFSM#(
 
   rule receiveGrantAck
     if (state == GRANT_WAIT && !needFill[1] && master.channelE.first.sink == sink);
+
+    if (verbose)
+      $display("Client: ", fshow(master.channelE.first));
+
     master.channelE.deq;
     state <= IDLE;
   endrule

@@ -1,5 +1,6 @@
 import BlockRam :: *;
 import TLServer :: *;
+import Arbiter :: *;
 import TLTypes :: *;
 import Vector :: *;
 import Utils :: *;
@@ -33,7 +34,6 @@ interface Mshr
   method Bool active;
   method Bit#(addrW) address;
   method Bit#(indexW) position;
-  method Bool needBus;
 endinterface
 
 typedef enum {
@@ -48,11 +48,12 @@ typedef enum {
 module mkMshr#(
     Bit#(sizeW) logSize,
     TLSlave#(`TL_ARGS) slave,
+    ArbiterClient_IFC arbiter,
     ReleaseFSM#(Bit#(indexW), `TL_ARGS) releaseM,
     Bram#(Bit#(indexW), Byte#(dataW)) bram
   ) (Mshr#(indexW, `TL_ARGS));
 
-  AcquireFSM#(Bit#(indexW), `TL_ARGS) acquireM <- mkAcquireFSM(logSize, bram, slave);
+  AcquireFSM#(Bit#(indexW), `TL_ARGS) acquireM <- mkAcquireFSM(logSize, slave, arbiter, bram);
 
   Reg#(Bit#(indexW)) index <- mkReg(?);
   Reg#(Transaction#(`TL_ARGS)) transaction <- mkReg(?);
@@ -98,7 +99,6 @@ module mkMshr#(
 
   method setSource = acquireM.setSource;
 
-  method Bool needBus = acquireM.needBus;
   method Bool canFree = state == Acquire && acquireM.canAcquireAck;
 
   method Bit#(addrW) address = transaction.next_addr;
@@ -143,13 +143,12 @@ interface MshrFile
   method Action probePerms(Reduce reduce);
   method Action probeFinish();
   method Bool canProbe;
-
-  method Bool needBusRd;
-  method Bool needBusWr;
 endinterface
 
 module mkMshrFile#(
     Bit#(sizeW) logSize,
+    ArbiterClient_IFC readArbiter,
+    ArbiterClient_IFC writeArbiter,
     Bram#(Bit#(indexW), Byte#(dataW)) bram
   ) (MshrFile#(mshr,indexW,`TL_ARGS));
 
@@ -167,14 +166,11 @@ module mkMshrFile#(
     interface channelE = toFifoI(fifoE);
   endinterface;
 
-  ReleaseFSM#(Bit#(indexW),`TL_ARGS) releaseM <- mkReleaseFSM(logSize, bram,slave);
+  ReleaseFSM#(Bit#(indexW),`TL_ARGS) releaseM <- mkReleaseFSM(logSize, slave, readArbiter, bram);
 
-  Vector#(mshr, Mshr#(indexW,`TL_ARGS)) mshrs <- replicateM(mkMshr(logSize, slave, releaseM, bram));
+  Vector#(mshr, Mshr#(indexW,`TL_ARGS)) mshrs <-
+    replicateM(mkMshr(logSize, slave, writeArbiter, releaseM, bram));
 
-  Bool needWrite = False;
-  for (Integer i=0; i < valueOf(mshr); i = i + 1) begin
-    needWrite = needWrite || mshrs[i].needBus;
-  end
 
   // Static scheduler to free any ready Mshr
   Bit#(mshr) freeMask;
@@ -184,9 +180,6 @@ module mkMshrFile#(
 
   Ehr#(2,Bit#(mshr)) reserved <- mkEhr(0);
   Fifo#(1,Token#(mshr)) reservationQ <- mkPipelineFifo;
-
-  method needBusRd = releaseM.needBus;
-  method needBusWr = needWrite;
 
   method Action start if (firstOneFrom(~reserved[1],0) matches tagged Valid .i);
     action

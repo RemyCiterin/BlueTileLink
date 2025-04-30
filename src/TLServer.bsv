@@ -25,6 +25,7 @@
 import Connectable :: *;
 import BlockRam :: *;
 import TLTypes :: *;
+import Arbiter :: *;
 import RegFile :: *;
 import Vector :: *;
 import Utils :: *;
@@ -51,9 +52,6 @@ interface AcquireFSM#(type indexT, `TL_ARGS_DECL);
   // Return if their is currently an acquire request
   method Bool active;
 
-  // For a potential bram bus arbiter
-  method Bool needBus;
-
   // Return the address of the current (or last) acquire sequence
   method Bit#(addrW) address;
 
@@ -70,9 +68,12 @@ logarithm of the size of the cache blocks it manage, a "block-ram" interface to
 manage to write the received data to, and a slave interface to interact with the
 coherence controller
 */
-module mkAcquireFSM
-  #(Bit#(sizeW) logSize, Bram#(Bit#(indexW), Byte#(dataW)) bram, TLSlave#(`TL_ARGS) slave)
-  (AcquireFSM#(Bit#(indexW), `TL_ARGS));
+module mkAcquireFSM#(
+    Bit#(sizeW) logSize,
+    TLSlave#(`TL_ARGS) slave,
+    ArbiterClient_IFC arbiter,
+    Bram#(Bit#(indexW), Byte#(dataW)) bram
+  ) (AcquireFSM#(Bit#(indexW), `TL_ARGS));
 
   MetaChannelD#(`TL_ARGS) metaD <- mkMetaChannelD(slave.channelD);
   let channelD = metaD.channel;
@@ -96,21 +97,20 @@ module mkAcquireFSM
   Reg#(Bit#(addrW)) addrReg <- mkReg(?);
   Reg#(Grow) growReg <- mkReg(?);
 
-  Wire#(Bool) needBusWire <- mkDWire(False);
-
   rule arbiterRequest
     if (
       channelD.first.opcode matches tagged GrantData .* &&&
       channelD.first.source == source
     );
 
-    needBusWire <= True;
+    arbiter.request();
   endrule
 
   rule receiveGrantData
     if (
       channelD.first.opcode matches tagged GrantData .p &&&
-      channelD.first.source == source
+      channelD.first.source == source &&
+      arbiter.grant
     );
     doAssert(
       channelD.first.size == logSize,
@@ -223,7 +223,6 @@ module mkAcquireFSM
   method Bool active = valid;
   method Bit#(addrW) address = addrReg;
   method Bool grant = grantStarted;
-  method needBus = needBusWire;
   method Grow grow = growReg;
 endmodule
 
@@ -234,14 +233,13 @@ interface BurstFSM#(type indexT, `TL_ARGS_DECL);
 
   method Action startBurst(OpcodeC opcode, indexT idx, Bit#(addrW) addr, Bit#(sizeW) size);
   method Action finishBurst();
-
-  // For a potential bram bus arbiter
-  method Bool needBus;
 endinterface
 
-module mkBurstFSM
-  #(Bram#(Bit#(indexW), Byte#(dataW)) bram, TLSlave#(`TL_ARGS) slave)
-  (BurstFSM#(Bit#(indexW), `TL_ARGS));
+module mkBurstFSM#(
+    TLSlave#(`TL_ARGS) slave,
+    ArbiterClient_IFC arbiter,
+    Bram#(Bit#(indexW), Byte#(dataW)) bram
+  ) (BurstFSM#(Bit#(indexW), `TL_ARGS));
 
   Reg#(Bit#(sourceW)) source <- mkReg(?);
   Reg#(Bool) started <- mkReg(False);
@@ -266,8 +264,6 @@ module mkBurstFSM
 
   Ehr#(2, Bool) valid <- mkEhr(False);
 
-  Wire#(Bool) needBusWire <- mkDWire(False);
-
   rule releaseStep if (valid[0] && size[0] > 0);
     let data = bram.response();
     bram.deq();
@@ -282,21 +278,21 @@ module mkBurstFSM
 
   rule arbiterRl1
     if (message.opcode matches tagged ReleaseData .* &&& size[1] > 0);
-    needBusWire <= True;
+    arbiter.request;
   endrule
 
   rule arbiterRl2
     if (message.opcode matches tagged ProbeAckData .* &&& size[1] > 0);
-    needBusWire <= True;
+    arbiter.request;
   endrule
 
   rule ramRequestRelease
-    if (message.opcode matches tagged ReleaseData .* &&& size[1] > 0);
+    if (message.opcode matches tagged ReleaseData .* &&& size[1] > 0 && arbiter.grant);
     bram.read(index[1]);
   endrule
 
   rule ramRequestProbe
-    if (message.opcode matches tagged ProbeAckData .* &&& size[1] > 0);
+    if (message.opcode matches tagged ProbeAckData .* &&& size[1] > 0 && arbiter.grant);
     bram.read(index[1]);
   endrule
 
@@ -350,8 +346,6 @@ module mkBurstFSM
       endcase
     endaction
   endmethod
-
-  method needBus = needBusWire;
 endmodule
 
 interface ReleaseFSM#(type indexT, `TL_ARGS_DECL);
@@ -375,9 +369,6 @@ interface ReleaseFSM#(type indexT, `TL_ARGS_DECL);
 
   // Return the reduction of the current transfers if it exists
   method Reduce reduce;
-
-  // For a potential bram bus arbiter
-  method Bool needBus;
 endinterface
 
 typedef enum {
@@ -397,9 +388,12 @@ typedef enum {
   RELEASE_BURST
 } ReleaseState deriving(Bits, FShow, Eq);
 
-module mkReleaseFSM
-  #(Bit#(sizeW) logSize, Bram#(Bit#(indexW), Byte#(dataW)) bram, TLSlave#(`TL_ARGS) slave)
-  (ReleaseFSM#(Bit#(indexW), `TL_ARGS));
+module mkReleaseFSM#(
+    Bit#(sizeW) logSize,
+    TLSlave#(`TL_ARGS) slave,
+    ArbiterClient_IFC arbiter,
+    Bram#(Bit#(indexW), Byte#(dataW)) bram
+  ) (ReleaseFSM#(Bit#(indexW), `TL_ARGS));
 
   Reg#(ChannelB#(`TL_ARGS)) message <- mkReg(?);
   Reg#(Bool) needData <- mkReg(?);
@@ -409,7 +403,7 @@ module mkReleaseFSM
   Reg#(Bit#(addrW)) addrReg <- mkReg(?);
   Reg#(Reduce) reduceReg <- mkReg(?);
 
-  BurstFSM#(Bit#(indexW), `TL_ARGS) burstM <- mkBurstFSM(bram, slave);
+  BurstFSM#(Bit#(indexW), `TL_ARGS) burstM <- mkBurstFSM(slave, arbiter, bram);
 
   Ehr#(2, ReleaseState) state <- mkEhr(INIT);
 
@@ -526,5 +520,4 @@ module mkReleaseFSM
   method active = state[1] != IDLE && state[1] != INIT;
   method reduce = reduceReg;
   method address = addrReg;
-  method needBus = burstM.needBus;
 endmodule

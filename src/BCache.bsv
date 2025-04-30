@@ -1,5 +1,6 @@
 import BlockRam :: *;
 import TLServer :: *;
+import Arbiter :: *;
 import TLTypes :: *;
 import Vector :: *;
 import Utils :: *;
@@ -134,11 +135,18 @@ module mkBCacheCore
   Vector#(2, BramBE#(Bit#(TAdd#(wayW, TAdd#(indexW, offsetW))), dataW)) vbram
     <- mkVectorBramBE(bram);
 
+  // As this cache is blocking it's not necessary to use an arbiter here
+  ArbiterClient_IFC arbiter = interface ArbiterClient_IFC;
+    method request = noAction;
+    method lock = noAction;
+    method grant = True;
+  endinterface;
+
   let vbram0 <- mkBramFromBramBE(vbram[0]);
   AcquireFSM#(Bit#(TAdd#(wayW, TAdd#(offsetW, indexW))), `TL_ARGS) acquireM <-
-    mkAcquireFSM(logSize, vbram0, slave);
+    mkAcquireFSM(logSize, slave, arbiter, vbram0);
     ReleaseFSM#(Bit#(TAdd#(wayW, TAdd#(offsetW, indexW))), `TL_ARGS) releaseM <-
-    mkReleaseFSM(logSize, vbram0, slave);
+    mkReleaseFSM(logSize, slave, arbiter, vbram0);
   let dataRam = vbram[1];
 
   Reg#(Bit#(wayW)) randomWay <- mkReg(0);

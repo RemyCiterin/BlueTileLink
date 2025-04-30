@@ -1,6 +1,7 @@
 import BlockRam :: *;
 import TLServer :: *;
 import TLTypes :: *;
+import Arbiter :: *;
 import Vector :: *;
 import Utils :: *;
 import MSHR :: *;
@@ -64,9 +65,24 @@ module mkNBCacheCore#(
   Vector#(2, BramBE#(Bit#(TAdd#(TLog#(way), TAdd#(indexW, offsetW))), dataW)) vbram
     <- mkVectorBramBE(bram);
 
+  Wire#(Bool) readBusy <- mkDWire(False);
+  Wire#(Bool) writeBusy <- mkDWire(False);
+
+  let readArbiter = interface ArbiterClient_IFC;
+    method request = readBusy._write(True);
+    method lock = noAction;
+    method grant = True;
+  endinterface;
+
+  let writeArbiter = interface ArbiterClient_IFC;
+    method request = writeBusy._write(True);
+    method lock = noAction;
+    method grant = True;
+  endinterface;
+
   let vbram0 <- mkBramFromBramBE(vbram[0]);
   MshrFile#(mshr,TAdd#(TLog#(way), TAdd#(offsetW, indexW)), `TL_ARGS) mshr <-
-    mkMshrFile(logSize, vbram0);
+    mkMshrFile(logSize, readArbiter, writeArbiter, vbram0);
   let dataRam = vbram[1];
 
   Reg#(Token#(way)) randomWay <- mkReg(0);
@@ -171,7 +187,7 @@ module mkNBCacheCore#(
   // TODO: improve the arbiter: we don't want to block if the request doesn't need the bram
   method ActionValue#(Maybe#(Token#(mshr)))
     matching(Bit#(tagW) t, Bool read, Byte#(dataW) data, Bit#(dataW) mask)
-    if (state[0] == Lookup && !mshr.needBusRd && !mshr.needBusWr);
+    if (state[0] == Lookup && !readBusy && !writeBusy);
 
     Token#(way) way = randomWay;
 

@@ -426,9 +426,12 @@ module mkReleaseFSM#(
   endfunction
 
   method Bool canProbe;
-    if (slave.channelB.first.source == source && state[1] == IDLE)
-      return True;
-    else
+    if (slave.channelB.canDeq) begin
+      if (slave.channelB.first.source == source && state[1] == IDLE)
+        return True;
+      else
+        return False;
+    end else
       return False;
   endmethod
 

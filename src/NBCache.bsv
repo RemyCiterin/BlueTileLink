@@ -10,9 +10,30 @@ import Ehr :: *;
 
 export NBCacheCore(..);
 export NBCacheConf(..);
+export NBCacheAck(..);
 export mkNBCacheCore;
 
 `include "TL.defines"
+
+typedef union tagged {
+  void Load;
+
+  struct {
+    Bit#(dataW) mask;
+    Byte#(dataW) data;
+  } Store;
+} NBCacheOp#(`TL_ARGS_DECL) deriving(Bits, FShow, Eq);
+
+typedef union tagged {
+  // The request is a success
+  void Success;
+
+  // The request is blocked, we can re-fire the request as soon as a mshr is free
+  void Blocked;
+
+  // The request is blocked, we can re-fire the request as soon as the mshr is free
+  Token#(mshr) BlockedBy;
+} NBCacheAck#(numeric type mshr) deriving(Bits, FShow, Eq);
 
 interface NBCacheCore
   #(numeric type mshr, numeric type way, type tagT, type indexT, type offsetT, `TL_ARGS_DECL);
@@ -20,13 +41,16 @@ interface NBCacheCore
   interface TLMaster#(`TL_ARGS) master;
 
   /*** Stage 1 ***/
-  method Action lookup(indexT index, offsetT offset);
+  method Action
+    lookup(indexT index, offsetT offset, Bool read, Byte#(dataW) data, Bit#(dataW) mask);
 
   /*** Stage 2 ***/
   // Return Invalid in case of success, overwise return the MSHR that
   // block the request
-  method ActionValue#(Maybe#(Token#(mshr)))
-    matching(tagT tag, Bool read, Byte#(dataW) data, Bit#(dataW) mask);
+  method ActionValue#(NBCacheAck#(mshr)) matching(tagT tag);
+
+  // Stop a request (e.g. TLB miss)
+  method Action abort;
 
   // Read response
   method ActionValue#(Byte#(dataW)) response;
@@ -98,15 +122,22 @@ module mkNBCacheCore#(
 
   Reg#(Bit#(indexW)) index <- mkReg(?);
   Reg#(Bit#(offsetW)) offset <- mkReg(?);
+  Reg#(Byte#(dataW)) data <- mkReg(?);
+  Reg#(Bit#(dataW)) mask <- mkReg(?);
+  Reg#(Bool) read <- mkReg(?);
+
   Reg#(Bit#(addrW)) probeAddr <- mkReg(?);
   Reg#(TLPerm) probePerm <- mkReg(?);
 
   // We can't run "lookup" or "lookupProbe" if one mshr can be free
   // to ensure forward progress (otherwise free can be blocked by retry requests)
-  Wire#(Bool) allowLookup <- mkWire;
+  Wire#(Bool) didFree <- mkDWire(False);
+  Wire#(Bool) canFree <- mkWire;
+
+  Bool allowLookup = !canFree || didFree;
 
   rule canFreeRl;
-    allowLookup <= !mshr.canFree;
+    canFree <= mshr.canFree;
   endrule
 
   rule lookupProbe if (state[1] == Idle && allowLookup);
@@ -117,6 +148,7 @@ module mkNBCacheCore#(
     probePerm <= perm;
 
     state[1] <= ProbeLookup;
+    $display("probe");
 
     for (Integer i=0; i < valueOf(way); i = i + 1) begin
       permRam[i].read(idx);
@@ -141,6 +173,8 @@ module mkNBCacheCore#(
       permRam[i].deq;
       tagRam[i].deq;
     end
+
+    $display("Probe at %h: ", probeAddr, fshow(perm), " => ", fshow(probePerm));
 
     // Same action for a Dirty and Thrunk cache block
     perm = perm == D ? T : perm;
@@ -169,10 +203,12 @@ module mkNBCacheCore#(
     mshr.probeFinish();
   endrule
 
-  method Action lookup(Bit#(indexW) idx, Bit#(offsetW) off)
-    if (state[1] == Idle && allowLookup && !mshr.canProbe);
+  method Action lookup(Bit#(indexW) idx, Bit#(offsetW) off, Bool r, Byte#(dataW) d, Bit#(dataW) m)
+  if (state[1] == Idle && allowLookup && !mshr.canProbe);
     action
-      mshr.start;
+      read <= r;
+      data <= d;
+      mask <= m;
       index <= idx;
       offset <= off;
       state[1] <= Lookup;
@@ -184,10 +220,20 @@ module mkNBCacheCore#(
     endaction
   endmethod
 
+  method Action abort if (state[0] == Lookup);
+    action
+      for (Integer i=0; i < valueof(way); i = i + 1) begin
+        permRam[i].deq;
+        tagRam[i].deq;
+      end
+
+      state[0] <= Idle;
+    endaction
+  endmethod
+
   // TODO: improve the arbiter: we don't want to block if the request doesn't need the bram
-  method ActionValue#(Maybe#(Token#(mshr)))
-    matching(Bit#(tagW) t, Bool read, Byte#(dataW) data, Bit#(dataW) mask)
-    if (state[0] == Lookup && !readBusy && !writeBusy);
+  method ActionValue#(NBCacheAck#(mshr)) matching(Bit#(tagW) t)
+    if (state[0] == Lookup && !(read && readBusy) && !(!read && writeBusy));
 
     Token#(way) way = randomWay;
 
@@ -215,18 +261,22 @@ module mkNBCacheCore#(
     // The request is blocked because a cache miss handling slot
     // already acquire this address, or use the same cache block
     if (mshr.search(tr.next_addr,{way,index,0}) matches tagged Valid .m) begin
-      mshr.stop;
-      return Valid(m);
+      return BlockedBy(m);
     end else if ((read && perm < B) || (!read && perm < T)) begin
-      let m <- mshr.allocate(tr,{way,index,0});
-      permRam[way].write(index,N);
-      tagRam[way].write(index,t);
-      return Valid(m);
+      let tok_opt <- mshr.allocate(tr,{way,index,0});
+
+      if (tok_opt matches tagged Valid .token) begin
+        $display("tagRam[%h,%h] := %h", way, index, t);
+        $display("permRam[%h,%h] := N", way, index);
+        permRam[way].write(index,N);
+        tagRam[way].write(index,t);
+        return BlockedBy(token);
+      end else
+        return Blocked;
     end else begin
       if (read) dataRam.read({way,index,offset});
       else dataRam.write({way,index,offset},data,mask);
-      mshr.stop;
-      return Invalid;
+      return Success;
     end
   endmethod
 
@@ -235,10 +285,12 @@ module mkNBCacheCore#(
     return dataRam.response;
   endmethod
 
-  method ActionValue#(Token#(mshr)) free;
+  method ActionValue#(Token#(mshr)) free if (state[0] == Idle);
     match {.m, .idx, .perm} <- mshr.free;
     match {.w,.i} = decodeIndex(idx);
     permRam[w].write(i,perm);
+    $display("permRam[%h,%h] := ", w, i, fshow(perm), " ");
+    didFree <= True;
     return m;
   endmethod
 

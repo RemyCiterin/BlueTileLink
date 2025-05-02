@@ -68,24 +68,20 @@ module mkMshr#(
 
   method Action allocate(Transaction#(`TL_ARGS) tr, Bit#(indexW) idx);
     action
+      doAssert(state == Idle, "mshr state must be Idle to allocate");
       if (tr.next_perm == D) tr.next_perm = T;
 
-      if (state == Idle) begin
-        transaction <= tr;
-        index <= idx;
+      transaction <= tr;
+      index <= idx;
 
-        if (tr.next_addr == tr.prev_addr || tr.prev_perm == N) begin
-          Grow grow = tr.next_perm == B ? NtoB : NtoT;
-          acquireM.acquireBlock(grow, idx, tr.next_addr);
-          state <= Acquire;
-        end else begin
-          Reduce reduce = tr.prev_perm == B ? BtoN : TtoN;
-          releaseM.releaseBlock(reduce, idx, tr.prev_addr);
-          state <= Release;
-        end
-
+      if (tr.next_addr == tr.prev_addr || tr.prev_perm == N) begin
+        Grow grow = tr.next_perm == B ? NtoB : NtoT;
+        acquireM.acquireBlock(grow, idx, tr.next_addr);
+        state <= Acquire;
       end else begin
-        doAssert(tr.next_addr == transaction.next_addr, "Wrong MSHR for this address");
+        Reduce reduce = tr.prev_perm == B ? BtoN : TtoN;
+        releaseM.releaseBlock(reduce, idx, tr.prev_addr);
+        state <= Release;
       end
     endaction
   endmethod
@@ -112,20 +108,13 @@ interface MshrFile
   interface TLMaster#(`TL_ARGS) master;
 
   /*** Stage 1 ***/
-  // Start a cache request
-  method Action start;
-
-  /*** Stage 2 ***/
-  // Stop a cache request without reading from memory (e.g. cache miss)
-  method Action stop;
-
   // Search if an Mshr match the current request address
   method Maybe#(Token#(mshr)) search(Bit#(addrW) address, Bit#(indexW) index);
 
   // Allocate a request (e.g. cache miss)
-  method ActionValue#(Token#(mshr)) allocate(Transaction#(`TL_ARGS) tr, Bit#(indexW) idx);
+  method ActionValue#(Maybe#(Token#(mshr))) allocate(Transaction#(`TL_ARGS) tr, Bit#(indexW) idx);
 
-  /*** Stage 3 ***/
+  /*** Stage 2 ***/
   // Inform the core that a transaction finish
   method ActionValue#(Tuple3#(Token#(mshr),Bit#(indexW),TLPerm)) free;
 
@@ -178,31 +167,20 @@ module mkMshrFile#(
     freeMask[i] = mshrs[i].canFree ? 1 : 0;
   end
 
-  Ehr#(2,Bit#(mshr)) reserved <- mkEhr(0);
-  Fifo#(1,Token#(mshr)) reservationQ <- mkPipelineFifo;
+  Bit#(mshr) rdy = 0;
+  for (Integer i=0; i < valueOf(mshr); i = i + 1) begin
+    rdy[i] = mshrs[i].active ? 0 : 1;
+  end
 
-  method Action start if (firstOneFrom(~reserved[1],0) matches tagged Valid .i);
-    action
-      reserved[1][i] <= 1;
-      reservationQ.enq(i);
-    endaction
-  endmethod
-
-  method Action stop;
-    action
-      reserved[0][reservationQ.first] <= 0;
-      reservationQ.deq;
-    endaction
-  endmethod
-
-  method ActionValue#(Token#(mshr)) allocate(Transaction#(`TL_ARGS) tr, Bit#(indexW) idx)
+  method ActionValue#(Maybe#(Token#(mshr))) allocate(Transaction#(`TL_ARGS) tr, Bit#(indexW) idx)
     if (!releaseM.active);
-    let i = reservationQ.first;
-    reservationQ.deq;
 
-    mshrs[i].allocate(tr, idx);
 
-    return i;
+    if (firstOneFrom(rdy,0) matches tagged Valid .i) begin
+      mshrs[i].allocate(tr, idx);
+      return Valid(i);
+    end else
+      return Invalid;
   endmethod
 
   method Maybe#(Token#(mshr)) search(Bit#(addrW) address, Bit#(indexW) index);
@@ -219,8 +197,6 @@ module mkMshrFile#(
   method ActionValue#(Tuple3#(Token#(mshr),Bit#(indexW),TLPerm)) free
     if (firstOneFrom(freeMask,0) matches tagged Valid .i);
     match {.idx, .perm} <- mshrs[i].free;
-    reserved[0][i] <= 0;
-
     return tuple3(i,idx,perm);
   endmethod
 

@@ -17,6 +17,7 @@ import NBCache :: *;
 import TLXBar :: *;
 
 import Connectable :: *;
+import PLRU :: *;
 
 module mkCPU(Empty);
 endmodule
@@ -55,16 +56,16 @@ module mkTestNBCache#(Vector#(TAdd#(MSHR,1), Bit#(SourceW)) sources)
   endrule
 
   // We use more addresses than the number of MSHR for this test
-  Vector#(32, Reg#(Maybe#(Token#(MSHR)))) mshr <- replicateM(mkReg(?));
+  Vector#(32, Reg#(NBCacheAck#(MSHR))) mshr <- replicateM(mkReg(?));
   Vector#(32, Reg#(Bit#(32))) response <- replicateM(mkReg(?));
 
   function Stmt read(Token#(32) id, Bit#(20) tag, Bit#(6) index, Bit#(4) offset) = seq
-    mshr[id] <= Valid(?);
+    mshr[id] <= Blocked;
 
-    while (mshr[id] != Invalid) seq
-      cache.lookup(index,offset);
+    while (mshr[id] != Success) seq
+      cache.lookup(index,offset,True,?,?);
       action
-        let m <- cache.matching(tag,True,?,?);
+        let m <- cache.matching(tag);
         mshr[id] <= m;
       endaction
     endseq
@@ -78,16 +79,17 @@ module mkTestNBCache#(Vector#(TAdd#(MSHR,1), Bit#(SourceW)) sources)
 
   function Stmt
     write(Token#(32) id, Bit#(20) tag, Bit#(6) index, Bit#(4) offset, Bit#(32) data) = seq
-    mshr[id] <= Valid(?);
+    mshr[id] <= Blocked;
 
-    while (mshr[id] != Invalid) seq
-      cache.lookup(index,offset);
+    while (mshr[id] != Success) seq
+      cache.lookup(index, offset, False, data, -1);
       $display("lookup %h", {tag,index,offset,2'b0});
       action
-        let m <- cache.matching(tag,False,data,-1);
+        let m <- cache.matching(tag);
+        $display("status: ", fshow(m));
         mshr[id] <= m;
 
-        if (m == Invalid) $display("mem[%h] <= %h", {tag,index,offset,2'b0}, data);
+        if (m == Success) $display("mem[%h] <= %h", {tag,index,offset,2'b0}, data);
       endaction
     endseq
   endseq;
@@ -105,7 +107,9 @@ module mkTestNBCache#(Vector#(TAdd#(MSHR,1), Bit#(SourceW)) sources)
       read(2,2,0,0);
     endpar
 
-    while (True) noAction;
+    $finish;
+
+    //while (True) noAction;
   endseq;
 
   mkAutoFSM(main);

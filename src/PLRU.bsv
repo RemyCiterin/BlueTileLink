@@ -5,7 +5,8 @@ export Tree(..);
 export toTree;
 export fromTree;
 
-typedef Bit#(TSub#(mshr,1)) PLRU#(numeric type mshr);
+// BCache is not happy with TSub#(ways,1), I dont' know why
+typedef Bit#(ways) PLRU#(numeric type ways);
 
 typedef union tagged {
   void Leaf;
@@ -16,7 +17,7 @@ typedef union tagged {
   } Node;
 } Tree deriving(FShow, Eq);
 
-function Tree toTree(PLRU#(mshr) plru);
+function Tree toTree(PLRU#(ways) plru);
   function Tree doRec(Integer pos, Integer size);
     if (size == 1) return Leaf;
     else begin
@@ -31,26 +32,26 @@ function Tree toTree(PLRU#(mshr) plru);
   endfunction
 
 
-  return doRec(0, valueOf(mshr));
+  return doRec(0, valueOf(ways));
 endfunction
 
-function PLRU#(mshr) fromTree(Tree tree);
-  function PLRU#(mshr) doRec(Tree t, Integer size);
+function PLRU#(ways) fromTree(Tree tree);
+  function PLRU#(ways) doRec(Tree t, Integer size);
     Integer half = size / 2;
 
     case (t) matches
       Leaf : return 0;
       tagged Node{dir: .dir, lhs: .lhs, rhs: .rhs} : begin
 
-        PLRU#(mshr) l = doRec(lhs, half) << 1;
-        PLRU#(mshr) r = doRec(rhs, half) << half;
+        PLRU#(ways) l = doRec(lhs, half) << 1;
+        PLRU#(ways) r = doRec(rhs, half) << half;
 
         return (dir == 1 ? 1 : 0) | l | r;
       end
     endcase
   endfunction
 
-  return doRec(tree, valueOf(mshr));
+  return doRec(tree, valueOf(ways));
 endfunction
 
 function Bit#(a) chooseTree(Tree tree, Integer size);
@@ -66,8 +67,8 @@ function Bit#(a) chooseTree(Tree tree, Integer size);
   endcase
 endfunction
 
-function Bit#(TLog#(mshr)) choose(PLRU#(mshr) plru);
-  return chooseTree(toTree(plru), valueOf(mshr));
+function Bit#(TLog#(ways)) choose(PLRU#(ways) plru);
+  return chooseTree(toTree(plru), valueOf(ways));
 endfunction
 
 function Tree nextTree(Tree tree, Bit#(a) path, Integer size);
@@ -85,6 +86,6 @@ function Tree nextTree(Tree tree, Bit#(a) path, Integer size);
     endcase
 endfunction
 
-function PLRU#(mshr) next(PLRU#(mshr) plru, Bit#(TLog#(mshr)) path);
-  return fromTree(nextTree(toTree(plru), path, valueOf(mshr)));
+function PLRU#(ways) next(PLRU#(ways) plru, Bit#(TLog#(ways)) path);
+  return fromTree(nextTree(toTree(plru), path, valueOf(ways)));
 endfunction

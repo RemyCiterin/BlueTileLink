@@ -24,9 +24,9 @@ endmodule
 
 typedef 32 AddrW;
 typedef 4 DataW;
-typedef 4 SinkW;
-typedef 8 SourceW;
 typedef 8 SizeW;
+typedef 8 SourceW;
+typedef 4 SinkW;
 
 typedef 2 NCache;
 
@@ -42,7 +42,7 @@ module mkTestNBCache#(Vector#(TAdd#(MSHR,1), Bit#(SourceW)) sources)
   function Tuple3#(Bit#(20),Bit#(6),Bit#(4)) decode(Bit#(32) addr) =
     tuple3(addr[31:12], addr[11:6], addr[5:2]);
 
-  NBCacheCore#(MSHR, 2, Bit#(20), Bit#(6), Bit#(4), AddrW, DataW, SizeW, SourceW, SinkW)
+  NBCacheCore#(MSHR, 4, Bit#(20), Bit#(6), Bit#(4), AddrW, DataW, SizeW, SourceW, SinkW)
     cache <- mkNBCacheCore(NBCacheConf{encode: encode, decode: decode});
 
   rule init;
@@ -107,14 +107,50 @@ module mkTestNBCache#(Vector#(TAdd#(MSHR,1), Bit#(SourceW)) sources)
       read(2,2,0,0);
     endpar
 
-    $finish;
-
     //while (True) noAction;
   endseq;
 
   mkAutoFSM(main);
 
-  return cache.master;
+  Fifo#(2, ChannelA#(32,2,8,8,4)) fifoA <- mkFifo;
+  Fifo#(2, ChannelB#(32,2,8,8,4)) fifoB <- mkFifo;
+  Fifo#(2, ChannelC#(32,2,8,8,4)) fifoC <- mkFifo;
+  Fifo#(2, ChannelD#(32,2,8,8,4)) fifoD <- mkFifo;
+  Fifo#(2, ChannelE#(32,2,8,8,4)) fifoE <- mkFifo;
+
+  mkDecreaseWidth(True, cache.master, interface TLSlave;
+    interface channelA = toFifoI(fifoA);
+    interface channelB = toFifoO(fifoB);
+    interface channelC = toFifoI(fifoC);
+    interface channelD = toFifoO(fifoD);
+    interface channelE = toFifoI(fifoE);
+  endinterface);
+
+  Fifo#(2, ChannelA#(32,4,8,8,4)) outA <- mkFifo;
+  Fifo#(2, ChannelB#(32,4,8,8,4)) outB <- mkFifo;
+  Fifo#(2, ChannelC#(32,4,8,8,4)) outC <- mkFifo;
+  Fifo#(2, ChannelD#(32,4,8,8,4)) outD <- mkFifo;
+  Fifo#(2, ChannelE#(32,4,8,8,4)) outE <- mkFifo;
+
+  mkIncreaseWidth(True, interface TLMaster;
+    interface channelA = toFifoO(fifoA);
+    interface channelB = toFifoI(fifoB);
+    interface channelC = toFifoO(fifoC);
+    interface channelD = toFifoI(fifoD);
+    interface channelE = toFifoO(fifoE);
+  endinterface, interface TLSlave;
+    interface channelA = toFifoI(outA);
+    interface channelB = toFifoO(outB);
+    interface channelC = toFifoI(outC);
+    interface channelD = toFifoO(outD);
+    interface channelE = toFifoI(outE);
+  endinterface);
+
+  interface channelA = toFifoO(outA);
+  interface channelB = toFifoI(outB);
+  interface channelC = toFifoO(outC);
+  interface channelD = toFifoI(outD);
+  interface channelE = toFifoO(outE);
 endmodule
 
 interface TestBCache;
@@ -148,7 +184,7 @@ module mkTestBCache#(Bit#(SourceW) source) (TestBCache);
     tuple3(addr[31:12], addr[11:6], addr[5:2]);
 
   Integer nCache = valueOf(NCache);
-  BCacheCore#(Bit#(1), Bit#(20), Bit#(6), Bit#(4), AddrW, DataW, SizeW, SourceW, SinkW)
+  BCacheCore#(2, Bit#(20), Bit#(6), Bit#(4), AddrW, DataW, SizeW, SourceW, SinkW)
     cache <- mkBCacheCore(BCacheConf{encode: encode, decode: decode},slave);
 
   rule setSource;

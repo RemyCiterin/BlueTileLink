@@ -5,6 +5,7 @@ import TLTypes :: *;
 import Vector :: *;
 import Utils :: *;
 import Fifo :: *;
+import PLRU :: *;
 import Ehr :: *;
 
 export CacheOp(..);
@@ -53,7 +54,7 @@ function Bool isStoreConditional(CacheOp#(dataW) op);
   else return False;
 endfunction
 
-interface BCacheCore#(type wayT, type tagT, type indexT, type offsetT, `TL_ARGS_DECL);
+interface BCacheCore#(numeric type numWay, type tagT, type indexT, type offsetT, `TL_ARGS_DECL);
   method Action lookup(indexT index, offsetT offset);
   method Action matching(tagT tag, CacheOp#(dataW) op);
   method ActionValue#(Byte#(dataW)) response;
@@ -64,10 +65,10 @@ endinterface
 
 typedef struct {
   TLPerm perm;
-  Bit#(wayW) way;
   Bit#(tagW) tag;
+  Token#(numWay) way;
   CacheOp#(dataW) op;
-} BCacheInfo#(numeric type wayW, numeric type tagW, numeric type dataW)
+} BCacheInfo#(numeric type numWay, numeric type tagW, numeric type dataW)
 deriving(FShow, Eq, Bits);
 
 typedef struct {
@@ -107,10 +108,11 @@ typedef struct {
 
 module mkBCacheCore
   #(BCacheConf#(tagW,indexW,offsetW,`TL_ARGS) conf, TLSlave#(`TL_ARGS) slave)
-  (BCacheCore#(Bit#(wayW), Bit#(tagW), Bit#(indexW), Bit#(offsetW), `TL_ARGS));
+  (BCacheCore#(numWay, Bit#(tagW), Bit#(indexW), Bit#(offsetW), `TL_ARGS));
 
-  Vector#(TExp#(wayW), Bram#(Bit#(indexW), TLPerm)) permRam <- replicateM(mkBramInit(N));
-  Vector#(TExp#(wayW), Bram#(Bit#(indexW), Bit#(tagW))) tagRam <- replicateM(mkBram());
+  Vector#(numWay, Bram#(Bit#(indexW), TLPerm)) permRam <- replicateM(mkBramInit(N));
+  Vector#(numWay, Bram#(Bit#(indexW), Bit#(tagW))) tagRam <- replicateM(mkBram());
+  Bram#(Bit#(indexW), PLRU#(numWay)) lruRam <- mkBram();
 
   Bit#(sizeW) logSize = fromInteger(valueOf(offsetW) + valueOf(TLog#(dataW)));
 
@@ -132,7 +134,7 @@ module mkBCacheCore
   endrule
 
   let bram <- mkBramBE();
-  Vector#(2, BramBE#(Bit#(TAdd#(wayW, TAdd#(indexW, offsetW))), dataW)) vbram
+  Vector#(2, BramBE#(Bit#(TAdd#(TLog#(numWay), TAdd#(indexW, offsetW))), dataW)) vbram
     <- mkVectorBramBE(bram);
 
   // As this cache is blocking it's not necessary to use an arbiter here
@@ -143,23 +145,17 @@ module mkBCacheCore
   endinterface;
 
   let vbram0 <- mkBramFromBramBE(vbram[0]);
-  AcquireFSM#(Bit#(TAdd#(wayW, TAdd#(offsetW, indexW))), `TL_ARGS) acquireM <-
+  AcquireFSM#(Bit#(TAdd#(TLog#(numWay), TAdd#(offsetW, indexW))), `TL_ARGS) acquireM <-
     mkAcquireFSM(logSize, slave, arbiter, vbram0);
-    ReleaseFSM#(Bit#(TAdd#(wayW, TAdd#(offsetW, indexW))), `TL_ARGS) releaseM <-
+    ReleaseFSM#(Bit#(TAdd#(TLog#(numWay), TAdd#(offsetW, indexW))), `TL_ARGS) releaseM <-
     mkReleaseFSM(logSize, slave, arbiter, vbram0);
   let dataRam = vbram[1];
-
-  Reg#(Bit#(wayW)) randomWay <- mkReg(0);
-
-  rule updateRandomWay;
-    randomWay <= randomWay + 1;
-  endrule
 
   Fifo#(2, Bool) successQ <- mkFifo;
 
   Reg#(Bit#(indexW)) index <- mkReg(0);
   Reg#(Bit#(offsetW)) offset <- mkReg(0);
-  Reg#(BCacheInfo#(wayW, tagW, dataW)) info <- mkReg(?);
+  Reg#(BCacheInfo#(numWay, tagW, dataW)) info <- mkReg(?);
   Reg#(BCacheProbeInfo#(tagW, indexW, offsetW)) probe <- mkReg(?);
   Ehr#(2, CacheState) state <- mkEhr(Idle);
   Reg#(CacheState) nextState <- mkReg(?);
@@ -171,7 +167,7 @@ module mkBCacheCore
 
   Reg#(Bit#(sourceW)) source <- mkReg(?);
 
-  function Action doMiss(Bit#(wayW) way, Bit#(tagW) tag, CacheOp#(dataW) op, TLPerm perm);
+  function Action doMiss(Token#(numWay) way, Bit#(tagW) tag, CacheOp#(dataW) op, TLPerm perm);
     action
       let tmp = info;
       tmp.perm = perm;
@@ -226,7 +222,7 @@ module mkBCacheCore
       tag: tag
     };
 
-    for (Integer i=0; i < valueOf(TExp#(wayW)); i = i + 1) begin
+    for (Integer i=0; i < valueOf(numWay); i = i + 1) begin
       permRam[i].read(idx);
       tagRam[i].read(idx);
     end
@@ -237,10 +233,10 @@ module mkBCacheCore
 
   rule matchProbe if (state[0] == ProbeMatching);
     Bit#(tagW) tag = ?;
-    Bit#(wayW) way = ?;
+    Token#(numWay) way = ?;
     TLPerm perm = N;
 
-    for (Integer i=0; i < valueOf(TExp#(wayW)); i = i + 1) begin
+    for (Integer i=0; i < valueOf(numWay); i = i + 1) begin
       if (tagRam[i].response == probe.tag && permRam[i].response > N) begin
         perm = permRam[i].response;
         way = fromInteger(i);
@@ -287,8 +283,9 @@ module mkBCacheCore
     action
       index <= idx;
       offset <= off;
+      lruRam.read(idx);
       state[1] <= Matching;
-      for (Integer i=0; i < valueOf(TExp#(wayW)); i = i + 1) begin
+      for (Integer i=0; i < valueOf(numWay); i = i + 1) begin
         permRam[i].read(idx);
         tagRam[i].read(idx);
       end
@@ -298,11 +295,16 @@ module mkBCacheCore
   method Action matching(Bit#(tagW) t, CacheOp#(dataW) op)
     if (state[0] == Matching && dataRam.canRead);
     action
-      Bit#(wayW) way = randomWay;
+      doAssert(2**log2(valueOf(numWay)) == valueOf(numWay), "\"numWay\" must be a power of 2");
+
+      PLRU#(numWay) lru = lruRam.response;
+      Token#(numWay) way = PLRU::choose(lru);
       Bit#(tagW) tag = tagRam[way].response;
       TLPerm perm = N;
 
-      for (Integer i=0; i < valueOf(TExp#(wayW)); i = i + 1) begin
+      lruRam.deq;
+
+      for (Integer i=0; i < valueOf(numWay); i = i + 1) begin
         if (tagRam[i].response == t && permRam[i].response > N) begin
           perm = permRam[i].response;
           way = fromInteger(i);
@@ -315,6 +317,8 @@ module mkBCacheCore
 
       Bool hit = perm >= T || (perm == B && !needPermT(op));
       Bool stop = op == Stop || (!hit && isStoreConditional(op));
+
+      if (!stop) lruRam.write(index, PLRU::next(lru, way));
 
       if (hit) numHit <= numHit + 1;
       else numMis <= numMis + 1;

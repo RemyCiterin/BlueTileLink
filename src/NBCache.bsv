@@ -6,6 +6,7 @@ import Vector :: *;
 import Utils :: *;
 import MSHR :: *;
 import Fifo :: *;
+import PLRU :: *;
 import Ehr :: *;
 
 export NBCacheCore(..);
@@ -80,6 +81,7 @@ module mkNBCacheCore#(
 
   Vector#(way, Bram#(Bit#(indexW), TLPerm)) permRam <- replicateM(mkBramInit(N));
   Vector#(way, Bram#(Bit#(indexW), Bit#(tagW))) tagRam <- replicateM(mkBram());
+  Bram#(Bit#(indexW), PLRU#(way)) lruRam <- mkBram;
 
   Bit#(sizeW) logSize = fromInteger(valueOf(offsetW) + valueOf(TLog#(dataW)));
 
@@ -148,7 +150,6 @@ module mkNBCacheCore#(
     probePerm <= perm;
 
     state[1] <= ProbeLookup;
-    $display("probe");
 
     for (Integer i=0; i < valueOf(way); i = i + 1) begin
       permRam[i].read(idx);
@@ -173,8 +174,6 @@ module mkNBCacheCore#(
       permRam[i].deq;
       tagRam[i].deq;
     end
-
-    $display("Probe at %h: ", probeAddr, fshow(perm), " => ", fshow(probePerm));
 
     // Same action for a Dirty and Thrunk cache block
     perm = perm == D ? T : perm;
@@ -213,6 +212,7 @@ module mkNBCacheCore#(
       offset <= off;
       state[1] <= Lookup;
 
+      lruRam.read(idx);
       for (Integer i=0; i < valueof(way); i = i + 1) begin
         permRam[i].read(idx);
         tagRam[i].read(idx);
@@ -222,6 +222,7 @@ module mkNBCacheCore#(
 
   method Action abort if (state[0] == Lookup);
     action
+      lruRam.deq;
       for (Integer i=0; i < valueof(way); i = i + 1) begin
         permRam[i].deq;
         tagRam[i].deq;
@@ -235,7 +236,9 @@ module mkNBCacheCore#(
   method ActionValue#(NBCacheAck#(mshr)) matching(Bit#(tagW) t)
     if (state[0] == Lookup && !(read && readBusy) && !(!read && writeBusy));
 
-    Token#(way) way = randomWay;
+    PLRU#(way) lru = lruRam.response;
+    Token#(way) way = PLRU::choose(lru);
+    lruRam.deq;
 
     for (Integer i=0; i < valueof(way); i = i + 1) begin
       if (tagRam[i].response == t && permRam[i].response > N) begin
@@ -266,14 +269,14 @@ module mkNBCacheCore#(
       let tok_opt <- mshr.allocate(tr,{way,index,0});
 
       if (tok_opt matches tagged Valid .token) begin
-        $display("tagRam[%h,%h] := %h", way, index, t);
-        $display("permRam[%h,%h] := N", way, index);
+        lruRam.write(index, PLRU::next(lru,way));
         permRam[way].write(index,N);
         tagRam[way].write(index,t);
         return BlockedBy(token);
       end else
         return Blocked;
     end else begin
+      lruRam.write(index, PLRU::next(lru,way));
       if (read) dataRam.read({way,index,offset});
       else dataRam.write({way,index,offset},data,mask);
       return Success;
@@ -289,7 +292,6 @@ module mkNBCacheCore#(
     match {.m, .idx, .perm} <- mshr.free;
     match {.w,.i} = decodeIndex(idx);
     permRam[w].write(i,perm);
-    $display("permRam[%h,%h] := ", w, i, fshow(perm), " ");
     didFree <= True;
     return m;
   endmethod

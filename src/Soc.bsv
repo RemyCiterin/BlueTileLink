@@ -107,7 +107,7 @@ module mkTestNBCache#(Vector#(TAdd#(MSHR,1), Bit#(SourceW)) sources)
       read(2,2,0,0);
     endpar
 
-    //while (True) noAction;
+    while (True) noAction;
   endseq;
 
   mkAutoFSM(main);

@@ -108,7 +108,7 @@ module mkAcquireBuffer#(Bit#(sizeW) logSize) (AcquireBuffer#(`TL_ARGS));
   endmethod
 endmodule
 
-// A TileLink snoop controller
+// A simple TileLink snoop controller
 module mkTileLinkClientFSM#(
     Bit#(sinkW) sink,
     Bit#(sizeW) logSize,
@@ -175,15 +175,6 @@ module mkTileLinkClientFSM#(
     fillSize[0] <= 1 << logSize;
     needFill[0] <= True;
 
-    slave.channelA.enq(ChannelA{
-      address: msg.address,
-      opcode: GetFull,
-      size: logSize,
-      source: sink,
-      mask: ?,
-      data: ?
-    });
-
     doAssert(msg.size == logSize, "Invalid channel A request size");
 
     Bit#(nSource) srcs = -1;
@@ -243,6 +234,15 @@ module mkTileLinkClientFSM#(
   rule toGrant if (state == PROBE_WAIT);
     state <= GRANT_BURST;
     probeM.finish;
+
+    slave.channelA.enq(ChannelA{
+      address: channelA.address,
+      opcode: GetFull,
+      size: logSize,
+      source: sink,
+      mask: ?,
+      data: ?
+    });
   endrule
 
   rule sendGrant if (state == GRANT_BURST);
@@ -355,13 +355,16 @@ endmodule
 // used as example by a Snoop Filter, a LLC, or just a snoop controller
 interface ProbeFSM#(numeric type indexW, numeric type nSource, `TL_ARGS_DECL);
   // Request to the FSM to send a probe signal to a set of sources, and write-back the result
-  method Action start(Bit#(indexW) index, OpcodeB opcode, Bit#(addrW) address, Bit#(nSource) owners);
+  method Action start(Bit#(indexW) idx, OpcodeB op, Bit#(addrW) addr, Bit#(nSource) owners);
 
   // Write a received data lane to the response buffer
   method ActionValue#(Tuple3#(Bit#(indexW), Byte#(dataW), Bool)) write;
 
   // Return if any agent still own the data
   method Bool exclusive;
+
+  // Return if we received some data
+  method Bool receiveData;
 
   // Finish th eprobe sequence
   method Action finish;
@@ -475,4 +478,5 @@ module mkProbeFSM#(
   endmethod
 
   method Bool exclusive = exc;
+  method Bool receiveData = hasData;
 endmodule

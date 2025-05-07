@@ -460,7 +460,8 @@ module mkReleaseFSM#(
     action
       state[1] <= PROBE_BURST;
       doAssert(reduce != NtoN, "ProbeAckData an invalid data");
-      burstM.startBurst(ProbeAckData(reduce), index, message.address, logSize);
+      OpcodeC opcode = needData ? ProbeAckData(reduce) : ProbeAck(reduce);
+      burstM.startBurst(opcode, index, message.address, logSize);
       addrReg <= message.address;
       reduceReg <= reduce;
     endaction

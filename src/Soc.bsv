@@ -13,7 +13,7 @@ import TLBram :: *;
 
 import TLTypes :: *;
 import MSHR :: *;
-import NBCache :: *;
+import NBCacheCore :: *;
 import TLXBar :: *;
 
 import Connectable :: *;

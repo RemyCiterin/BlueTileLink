@@ -60,6 +60,9 @@ interface BCacheCore#(numeric type numWay, type tagT, type indexT, type offsetT,
   method ActionValue#(Byte#(dataW)) response;
   method ActionValue#(Bool) success;
 
+  /*** Inform the host CPU that we evict a cache block ***/
+  interface FifoO#(Bit#(addrW)) evict;
+
   method Action setSource(Bit#(sourceW) source);
 endinterface
 
@@ -104,7 +107,6 @@ typedef struct {
   function Bit#(addrW) encode(Bit#(tagW) tag, Bit#(indexW) index, Bit#(offsetW) offset) encode;
   function Tuple3#(Bit#(tagW),Bit#(indexW),Bit#(offsetW)) decode(Bit#(addrW) tag) decode;
 } BCacheConf#(numeric type tagW, numeric type indexW, numeric type offsetW, `TL_ARGS_DECL);
-
 
 module mkBCacheCore
   #(BCacheConf#(tagW,indexW,offsetW,`TL_ARGS) conf, TLSlave#(`TL_ARGS) slave)
@@ -152,6 +154,8 @@ module mkBCacheCore
   let dataRam = vbram[1];
 
   Fifo#(2, Bool) successQ <- mkFifo;
+
+  Fifo#(2, Bit#(addrW)) evictQ <- mkFifo;
 
   Reg#(Bit#(indexW)) index <- mkReg(0);
   Reg#(Bit#(offsetW)) offset <- mkReg(0);
@@ -257,6 +261,7 @@ module mkBCacheCore
       {B, N} : begin
         releaseM.probePerms(BtoN);
         permRam[way].write(probe.index, N);
+        evictQ.enq(conf.encode(tag, probe.index, 0));
         unreserve();
       end
       {T, B} : begin
@@ -266,6 +271,7 @@ module mkBCacheCore
       end
       {T, N} : begin
         releaseM.probeBlock(TtoN, {way,probe.index,0});
+        evictQ.enq(conf.encode(tag, probe.index, 0));
         permRam[way].write(probe.index, N);
         unreserve();
       end
@@ -357,6 +363,8 @@ module mkBCacheCore
           B : releaseM.releasePerms(BtoN, address);
         endcase
 
+        evictQ.enq(address);
+
         case (permRam[way].response) matches
           D: state[0] <= Release;
           default: begin
@@ -399,4 +407,6 @@ module mkBCacheCore
       releaseM.setSource(src);
     endaction
   endmethod
+
+  interface evict = toFifoO(evictQ);
 endmodule

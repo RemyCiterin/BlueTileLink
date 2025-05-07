@@ -62,6 +62,9 @@ interface NBCacheCore
   /*** Initialisation ***/
   // The first entry is used as a source for release/probe requests
   method Action setSources(Vector#(TAdd#(1,mshr),Bit#(sourceW)) sources);
+
+  /*** Inform host CPU that we evict a cache block ***/
+  interface FifoO#(Bit#(addrW)) evict;
 endinterface
 
 // Invariant: the offset must correspond to the position of a beat in a cache block,
@@ -86,6 +89,8 @@ module mkNBCacheCore#(
   Bit#(sizeW) logSize = fromInteger(valueOf(offsetW) + valueOf(TLog#(dataW)));
 
   Ehr#(2, NBCacheState) state <- mkEhr(Idle);
+
+  Fifo#(2, Bit#(addrW)) evictQ <- mkFifo;
 
   let bram <- mkBramBE();
   Vector#(2, BramBE#(Bit#(TAdd#(TLog#(way), TAdd#(indexW, offsetW))), dataW)) vbram
@@ -186,6 +191,7 @@ module mkNBCacheCore#(
       {B, N} : begin
         mshr.probePerms(BtoN);
         permRam[way].write(idx, N);
+        evictQ.enq(probeAddr);
       end
       {T, B} : begin
         mshr.probeBlock(TtoB, {way,idx,0});
@@ -194,6 +200,7 @@ module mkNBCacheCore#(
       {T, N} : begin
         mshr.probeBlock(TtoN, {way,idx,0});
         permRam[way].write(idx, N);
+        evictQ.enq(probeAddr);
       end
     endcase
   endrule
@@ -269,6 +276,7 @@ module mkNBCacheCore#(
       let tok_opt <- mshr.allocate(tr,{way,index,0});
 
       if (tok_opt matches tagged Valid .token) begin
+        if (t != tag) evictQ.enq(conf.encode(tag,index,offset));
         lruRam.write(index, PLRU::next(lru,way));
         permRam[way].write(index,N);
         tagRam[way].write(index,t);
@@ -295,6 +303,8 @@ module mkNBCacheCore#(
     didFree <= True;
     return m;
   endmethod
+
+  interface evict = toFifoO(evictQ);
 
   interface master = mshr.master;
 

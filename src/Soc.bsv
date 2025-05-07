@@ -50,6 +50,10 @@ module mkTestNBCache#(Vector#(TAdd#(MSHR,1), Bit#(SourceW)) sources)
     cache.setSources(sources);
   endrule
 
+  rule deqEvict;
+    cache.evict.deq;
+  endrule
+
   rule free;
     let m <- cache.free;
     $display("free %d", m);
@@ -186,6 +190,10 @@ module mkTestBCache#(Bit#(SourceW) source) (TestBCache);
   Integer nCache = valueOf(NCache);
   BCacheCore#(2, Bit#(20), Bit#(6), Bit#(4), AddrW, DataW, SizeW, SourceW, SinkW)
     cache <- mkBCacheCore(BCacheConf{encode: encode, decode: decode},slave);
+
+  rule deqEvict;
+    cache.evict.deq;
+  endrule
 
   rule setSource;
     cache.setSource(source);

@@ -3,6 +3,7 @@ import SpecialFIFOs :: *;
 import BypassReg :: *;
 import BRAMCore :: *;
 import Vector :: *;
+import Array :: *;
 import Utils :: *;
 
 import AXI4_Lite :: *;
@@ -271,9 +272,9 @@ endmodule
 // This is a wrapper on Bram that allow to write using a mask (so it's not necessary to load
 // the data first)
 interface BramBE#(type addrT, numeric type dataW);
-  method Action write(addrT addr, Byte#(dataW) data, Bit#(dataW) mask);
+  method Action write(addrT addr, Bit#(dataW) data, Bit#(TDiv#(dataW,8)) mask);
   method Action read(addrT addr);
-  method Byte#(dataW) response;
+  method Bit#(dataW) response;
   method Bool canRead;
   method Bool canDeq;
   method Action deq;
@@ -281,41 +282,46 @@ endinterface
 
 module mkSizedBramBE#(Integer size) (BramBE#(addrT, dataW))
   provisos (Bits#(addrT, addrSz), Eq#(addrT));
-  BramVec#(addrT, dataW, Bit#(8)) bram <- mkSizedBramVec(size);
+  BramVec#(addrT, TDiv#(dataW,8), Bit#(8)) bram <- mkSizedBramVec(size);
 
   method canDeq = bram.canDeq;
-  method response = pack(bram.response);
+  method response = packArray(vectorToArray(bram.response));
   method canRead = bram.canRead;
   method read = bram.read;
   method deq = bram.deq;
 
-  method Action write(addrT addr, Byte#(dataW) data, Bit#(dataW) mask);
+  method Action write(addrT addr, Bit#(dataW) data, Bit#(TDiv#(dataW,8)) mask);
     action
-      bram.write(addr, unpack(data), mask);
+      bram.write(addr, arrayToVector(unpackArray(data, valueof(dataW)/8)), mask);
     endaction
   endmethod
 endmodule
 
 module mkSizedBramGenBE
-  #(Integer size, function Byte#(dataW) gen(addrT addr)) (BramBE#(addrT, dataW))
+  #(Integer size, function Bit#(dataW) gen(addrT addr)) (BramBE#(addrT, dataW))
   provisos (Bits#(addrT, addrSz), Eq#(addrT));
-  BramVec#(addrT, dataW, Bit#(8)) bram <- mkSizedBramGenVec(size, compose(unpack, gen));
+
+  function Vector#(TDiv#(dataW,8), Bit#(8)) genVector(addrT a) =
+    arrayToVector(unpackArray(gen(a), valueOf(dataW)/8));
+
+  BramVec#(addrT, TDiv#(dataW,8), Bit#(8)) bram <-
+    mkSizedBramGenVec(size, genVector);
 
   method canDeq = bram.canDeq;
-  method response = pack(bram.response);
+  method response = packArray(vectorToArray(bram.response));
   method canRead = bram.canRead;
   method read = bram.read;
   method deq = bram.deq;
 
-  method Action write(addrT addr, Byte#(dataW) data, Bit#(dataW) mask);
+  method Action write(addrT addr, Bit#(dataW) data, Bit#(TDiv#(dataW,8)) mask);
     action
-      bram.write(addr, unpack(data), mask);
+      bram.write(addr, arrayToVector(unpackArray(data, valueof(dataW)/8)), mask);
     endaction
   endmethod
 endmodule
 
 module mkSizedBramInitBE
-  #(Integer size, Byte#(dataW) init) (BramBE#(addrT, dataW))
+  #(Integer size, Bit#(dataW) init) (BramBE#(addrT, dataW))
   provisos (Bits#(addrT, addrWidth), Eq#(addrT));
   let ifc <- mkSizedBramGenBE(size, constFn(init));
   return ifc;
@@ -327,13 +333,13 @@ module mkBramBE(BramBE#(addrT, dataW))
   return ifc;
 endmodule
 
-module mkBramGenBE#(function Byte#(dataW) gen(addrT addr))(BramBE#(addrT, dataW))
+module mkBramGenBE#(function Bit#(dataW) gen(addrT addr))(BramBE#(addrT, dataW))
   provisos (Bits#(addrT, addrWidth), Eq#(addrT));
   let ifc <- mkSizedBramGenBE(valueOf(TExp#(addrWidth)), gen);
   return ifc;
 endmodule
 
-module mkBramInitBE#(Byte#(dataW) init) (BramBE#(addrT, dataW))
+module mkBramInitBE#(Bit#(dataW) init) (BramBE#(addrT, dataW))
   provisos (Bits#(addrT, addrWidth), Eq#(addrT));
   let ifc <- mkSizedBramInitBE(valueOf(TExp#(addrWidth)), init);
   return ifc;
@@ -390,7 +396,7 @@ module mkVectorBramBE#(BramBE#(addrT, dataW) bram) (Vector#(n, BramBE#(addrT, da
 
       method canRead = bram.canRead;
 
-      method Byte#(dataW) response() if (ehr[0] == fromInteger(i));
+      method Bit#(dataW) response() if (ehr[0] == fromInteger(i));
         return bram.response();
       endmethod
 
@@ -442,14 +448,14 @@ module mkVectorBramVec#(BramVec#(addrT, m, dataT) bram)
   return ret;
 endmodule
 
-module mkBramFromBramBE#(BramBE#(addrT, dataW) bram) (Bram#(addrT, Byte#(dataW)));
+module mkBramFromBramBE#(BramBE#(addrT, dataW) bram) (Bram#(addrT, Bit#(dataW)));
   method response = bram.response;
   method canRead = bram.canRead;
   method canDeq = bram.canDeq;
   method read = bram.read;
   method deq = bram.deq;
 
-  method Action write(addrT addr, Byte#(dataW) data) =
+  method Action write(addrT addr, Bit#(dataW) data) =
     bram.write(addr, data, -1);
 endmodule
 

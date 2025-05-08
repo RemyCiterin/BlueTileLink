@@ -20,8 +20,8 @@ typedef union tagged {
   void Load;
 
   struct {
-    Bit#(dataW) mask;
-    Byte#(dataW) data;
+    Bit#(TDiv#(dataW,8)) mask;
+    Bit#(dataW) data;
   } Store;
 } NBCacheOp#(`TL_ARGS_DECL) deriving(Bits, FShow, Eq);
 
@@ -43,7 +43,7 @@ interface NBCacheCore
 
   /*** Stage 1 ***/
   method Action
-    lookup(indexT index, offsetT offset, Bool read, Byte#(dataW) data, Bit#(dataW) mask);
+    lookup(indexT index, offsetT offset, Bool read, Bit#(dataW) data, Bit#(TDiv#(dataW,8)) mask);
 
   /*** Stage 2 ***/
   // Return Invalid in case of success, overwise return the MSHR that
@@ -54,7 +54,7 @@ interface NBCacheCore
   method Action abort;
 
   // Read response
-  method ActionValue#(Byte#(dataW)) response;
+  method ActionValue#(Bit#(dataW)) response;
 
   // Free a mshr
   method ActionValue#(Token#(mshr)) free;
@@ -86,7 +86,7 @@ module mkNBCacheCore#(
   Vector#(way, Bram#(Bit#(indexW), Bit#(tagW))) tagRam <- replicateM(mkBram());
   Bram#(Bit#(indexW), PLRU#(way)) lruRam <- mkBram;
 
-  Bit#(sizeW) logSize = fromInteger(valueOf(offsetW) + valueOf(TLog#(dataW)));
+  Bit#(sizeW) logSize = fromInteger(valueOf(offsetW) + log2(valueOf(dataW)/8));
 
   Ehr#(2, NBCacheState) state <- mkEhr(Idle);
 
@@ -129,8 +129,8 @@ module mkNBCacheCore#(
 
   Reg#(Bit#(indexW)) index <- mkReg(?);
   Reg#(Bit#(offsetW)) offset <- mkReg(?);
-  Reg#(Byte#(dataW)) data <- mkReg(?);
-  Reg#(Bit#(dataW)) mask <- mkReg(?);
+  Reg#(Bit#(dataW)) data <- mkReg(?);
+  Reg#(Bit#(TDiv#(dataW,8))) mask <- mkReg(?);
   Reg#(Bool) read <- mkReg(?);
 
   Reg#(Bit#(addrW)) probeAddr <- mkReg(?);
@@ -209,7 +209,7 @@ module mkNBCacheCore#(
     mshr.probeFinish();
   endrule
 
-  method Action lookup(Bit#(indexW) idx, Bit#(offsetW) off, Bool r, Byte#(dataW) d, Bit#(dataW) m)
+  method Action lookup(Bit#(indexW) idx, Bit#(offsetW) off, Bool r, Bit#(dataW) d, Bit#(TDiv#(dataW,8)) m)
   if (state[1] == Idle && allowLookup && !mshr.canProbe);
     action
       read <= r;
@@ -291,7 +291,7 @@ module mkNBCacheCore#(
     end
   endmethod
 
-  method ActionValue#(Byte#(dataW)) response;
+  method ActionValue#(Bit#(dataW)) response;
     dataRam.deq;
     return dataRam.response;
   endmethod

@@ -18,8 +18,8 @@ export mkBCacheCore;
 typedef union tagged {
   // Aligned Store
   struct {
-    Byte#(dataW) data;
-    Bit#(dataW) mask;
+    Bit#(dataW) data;
+    Bit#(TDiv#(dataW,8)) mask;
   } Store;
 
   // Load
@@ -27,8 +27,8 @@ typedef union tagged {
 
   // LR/SC sequence
   struct {
-    Byte#(dataW) data;
-    Bit#(dataW) mask;
+    Bit#(dataW) data;
+    Bit#(TDiv#(dataW,8)) mask;
   } StoreConditional;
 
   void LoadReserve;
@@ -57,7 +57,7 @@ endfunction
 interface BCacheCore#(numeric type numWay, type tagT, type indexT, type offsetT, `TL_ARGS_DECL);
   method Action lookup(indexT index, offsetT offset);
   method Action matching(tagT tag, CacheOp#(dataW) op);
-  method ActionValue#(Byte#(dataW)) response;
+  method ActionValue#(Bit#(dataW)) response;
   method ActionValue#(Bool) success;
 
   /*** Inform the host CPU that we evict a cache block ***/
@@ -116,7 +116,7 @@ module mkBCacheCore
   Vector#(numWay, Bram#(Bit#(indexW), Bit#(tagW))) tagRam <- replicateM(mkBram());
   Bram#(Bit#(indexW), PLRU#(numWay)) lruRam <- mkBram();
 
-  Bit#(sizeW) logSize = fromInteger(valueOf(offsetW) + valueOf(TLog#(dataW)));
+  Bit#(sizeW) logSize = fromInteger(valueOf(offsetW) + log2(valueOf(dataW)/8));
 
   Ehr#(2, Bit#(8)) reservedTimer <- mkEhr(0);
   Reg#(Bool) reserved <- mkReg(False);
@@ -390,7 +390,7 @@ module mkBCacheCore
     endaction
   endmethod
 
-  method ActionValue#(Byte#(dataW)) response;
+  method ActionValue#(Bit#(dataW)) response;
     dataRam.deq();
     return dataRam.response();
   endmethod

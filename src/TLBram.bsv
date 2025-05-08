@@ -29,8 +29,8 @@ module mkTLBram#(
   MetaChannelA#(`TL_ARGS) metaA <- mkMetaChannelA(master.channelA);
   let message = metaA.channel.first;
 
-  Bit#(sizeW) logDataW = fromInteger(valueOf(TLog#(dataW)));
-  Integer laneSize = valueOf(dataW);
+  Bit#(sizeW) logBusSize = fromInteger(log2(valueOf(dataW)/8));
+  Integer busSize = valueOf(dataW)/8;
 
   Reg#(Bit#(sourceW)) msgSource <- mkReg(?);
   Reg#(Bit#(sizeW)) msgSize <- mkReg(?);
@@ -41,7 +41,7 @@ module mkTLBram#(
   Ehr#(2, TLBramState) state <- mkEhr(Idle);
 
   rule readBram if (state[1] == Read);
-    bram.read(addrReg[1] >> logDataW);
+    bram.read(addrReg[1] >> logBusSize);
   endrule
 
   rule startGetFull if (message.opcode == GetFull && state[0] == Idle);
@@ -57,7 +57,7 @@ module mkTLBram#(
     Bit#(addrW) addr = addrReg[0];
     TLSize size = sizeReg[0];
 
-    Bool last = fromInteger(laneSize) >= size;
+    Bool last = fromInteger(busSize) >= size;
 
     fifoD.enq(ChannelD{
       opcode: AccessAckData,
@@ -70,14 +70,14 @@ module mkTLBram#(
     bram.deq;
 
     state[0] <= last ? Idle : Read;
-    sizeReg[0] <= size - fromInteger(laneSize);
-    addrReg[0] <= addr + fromInteger(laneSize);
+    sizeReg[0] <= size - fromInteger(busSize);
+    addrReg[0] <= addr + fromInteger(busSize);
   endrule
 
   rule receivePutData
     if (message.opcode == PutData && state[0] != Read);
 
-    bram.write(metaA.address >> logDataW, message.data, message.mask);
+    bram.write(metaA.address >> logBusSize, message.data, message.mask);
     metaA.channel.deq;
 
     state[0] <= metaA.last ? Idle : Write;

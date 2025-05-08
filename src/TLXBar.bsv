@@ -2,6 +2,7 @@ import Connectable :: *;
 import TLTypes :: *;
 import RegFile :: *;
 import Vector :: *;
+import Array :: *;
 import Utils :: *;
 import Fifo :: *;
 import Ehr :: *;
@@ -41,7 +42,7 @@ module mkXBar#(XBarConf#(n,m,`TL_ARGS) conf) (XBar#(n,m,`TL_ARGS));
   Fifo#(2, ChannelD#(`TL_ARGS)) fifoD <- mkFifo;
   Fifo#(2, ChannelE#(`TL_ARGS)) fifoE <- mkFifo;
 
-  TLSize dataSize = fromInteger(valueOf(dataW));
+  TLSize busSize = fromInteger(valueOf(dataW)/8);
 
   Reg#(Token#(m)) tokenA <- mkReg(?);
   Reg#(Token#(m)) tokenC <- mkReg(?);
@@ -92,7 +93,7 @@ module mkXBar#(XBarConf#(n,m,`TL_ARGS) conf) (XBar#(n,m,`TL_ARGS));
         method Action enq(ChannelD#(`TL_ARGS) msg) if (canEnqD);
           action
             let size = sizeD == 0 ? 1 << msg.size : sizeD;
-            sizeD <= size < dataSize || !hasDataD(msg.opcode) ? 0 : size - dataSize;
+            sizeD <= size < busSize || !hasDataD(msg.opcode) ? 0 : size - busSize;
             tokenD <= fromInteger(i);
             fifoD.enq(msg);
           endaction
@@ -126,7 +127,7 @@ module mkXBar#(XBarConf#(n,m,`TL_ARGS) conf) (XBar#(n,m,`TL_ARGS));
         method Action enq(ChannelA#(`TL_ARGS) msg) if (canEnqA);
           action
             let size = sizeA == 0 ? 1 << msg.size : sizeA;
-            sizeA <= size < dataSize || !hasDataA(msg.opcode) ? 0 : size - dataSize;
+            sizeA <= size < busSize || !hasDataA(msg.opcode) ? 0 : size - busSize;
             tokenA <= fromInteger(i);
             fifoA.enq(msg);
           endaction
@@ -144,7 +145,7 @@ module mkXBar#(XBarConf#(n,m,`TL_ARGS) conf) (XBar#(n,m,`TL_ARGS));
         method Action enq(ChannelC#(`TL_ARGS) msg) if (canEnqC);
           action
             let size = sizeC == 0 ? 1 << msg.size : sizeC;
-            sizeC <= size < dataSize || !hasDataC(msg.opcode) ? 0 : size - dataSize;
+            sizeC <= size < busSize || !hasDataC(msg.opcode) ? 0 : size - busSize;
             tokenC <= fromInteger(i);
             fifoC.enq(msg);
           endaction
@@ -174,8 +175,8 @@ module mkIncreaseWidthChannelA#(
   let channel = meta.channel;
   let msg = channel.first;
 
-  Reg#(Vector#(ratio,Byte#(dataW))) dataReg <- mkReg(replicate(0));
-  Reg#(Vector#(ratio,Bit#(dataW))) maskReg <- mkReg(replicate(0));
+  Reg#(Vector#(ratio,Bit#(dataW))) dataReg <- mkReg(replicate(0));
+  Reg#(Vector#(ratio,Bit#(TDiv#(dataW,8)))) maskReg <- mkReg(replicate(0));
   Reg#(Token#(ratio)) index <- mkReg(0);
 
   rule connect;
@@ -183,21 +184,21 @@ module mkIncreaseWidthChannelA#(
     doAssert(valueof(ratio) == 2**log2(valueof(ratio)), "TileLink bus width must be a power of 2");
     doAssert(valueof(dataW) == 2**log2(valueof(dataW)), "TileLink bus width must be a power of 2");
 
-    Vector#(ratio,Bit#(dataW)) mask = maskReg;
-    Vector#(ratio,Byte#(dataW)) data = dataReg;
+    Vector#(ratio,Bit#(TDiv#(dataW,8))) mask = maskReg;
+    Vector#(ratio,Bit#(dataW)) data = dataReg;
 
-    Integer low = log2(valueOf(dataW));
+    Integer low = log2(valueOf(dataW)/8);
     Integer high = low + log2(valueOf(ratio)) - 1;
     mask[Token#(ratio)'(meta.address[high:low])] = msg.mask;
     data[Token#(ratio)'(meta.address[high:low])] = msg.data;
 
     if (index == maxBound || meta.last) begin
       slave.enq(ChannelA{
+        mask: packArray(vectorToArray(mask)),
         opcode: msg.opcode,
         source: msg.source,
         address: msg.address,
         data: pack(data),
-        mask: pack(mask),
         size: msg.size
       });
     end
@@ -219,7 +220,7 @@ module mkIncreaseWidthChannelC#(
   let channel = meta.channel;
   let msg = channel.first;
 
-  Reg#(Vector#(ratio,Byte#(dataW))) dataReg <- mkReg(replicate(0));
+  Reg#(Vector#(ratio,Bit#(dataW))) dataReg <- mkReg(replicate(0));
   Reg#(Token#(ratio)) index <- mkReg(0);
 
   rule connect;
@@ -227,8 +228,8 @@ module mkIncreaseWidthChannelC#(
     doAssert(valueof(ratio) == 2**log2(valueof(ratio)), "TileLink bus width must be a power of 2");
     doAssert(valueof(dataW) == 2**log2(valueof(dataW)), "TileLink bus width must be a power of 2");
 
-    Vector#(ratio,Byte#(dataW)) data = dataReg;
-    data[(meta.address >> valueOf(TLog#(dataW))) & fromInteger(valueOf(ratio)-1)] = msg.data;
+    Vector#(ratio,Bit#(dataW)) data = dataReg;
+    data[(meta.address >> log2(valueOf(dataW)/8)) & fromInteger(valueOf(ratio)-1)] = msg.data;
 
     if (index == maxBound || meta.last) begin
       slave.enq(ChannelC{
@@ -258,14 +259,14 @@ module mkIncreaseWidthChannelD#(
   let msg = channel.first;
 
   RegFile#(Bit#(sourceW), Token#(ratio)) indexes <- mkRegFileFull;
-  Reg#(Vector#(ratio,Byte#(dataW))) dataReg <- mkReg(replicate(0));
+  Reg#(Vector#(ratio,Bit#(dataW))) dataReg <- mkReg(replicate(0));
   Reg#(Token#(ratio)) index <- mkReg(0);
 
   rule connect;
     doAssert(valueof(ratio) == 2**log2(valueof(ratio)), "TileLink bus width must be a power of 2");
     doAssert(valueof(dataW) == 2**log2(valueof(dataW)), "TileLink bus width must be a power of 2");
 
-    Vector#(ratio,Byte#(dataW)) data = dataReg;
+    Vector#(ratio,Bit#(dataW)) data = dataReg;
     data[meta.first ? indexes.sub(msg.source) : index] = msg.data;
 
     if (index == maxBound || meta.last) begin
@@ -288,7 +289,7 @@ module mkIncreaseWidthChannelD#(
 
   method Action enq(ChannelA#(`TL_ARGS) m);
     action
-      Integer low = log2(valueOf(dataW));
+      Integer low = log2(valueOf(dataW)/8);
       Integer high = low + log2(valueOf(ratio)) - 1;
       indexes.upd(m.source, m.address[high:low]);
       slaveA.enq(m);
@@ -304,18 +305,18 @@ module mkDecreaseWidthChannelA#(
 
   let msg = master.first;
 
-  Vector#(ratio,Bit#(dataW)) mask = unpack(msg.mask);
-  Vector#(ratio,Byte#(dataW)) data = unpack(msg.data);
+  Vector#(ratio,Bit#(TDiv#(dataW,8))) mask = arrayToVector(unpackArray(msg.mask,valueof(ratio)));
+  Vector#(ratio,Bit#(dataW)) data = unpack(msg.data);
 
   Reg#(Token#(ratio)) indexReg <- mkReg(0);
 
-  Integer low = log2(valueOf(dataW));
+  Integer low = log2(valueOf(dataW)/8);
   Integer high = low + log2(valueOf(ratio)) - 1;
 
   TLSize size = 1 << msg.size;
   Token#(ratio) firstIndex = msg.address[high:low];
   Token#(ratio) length =
-    hasDataA(msg.opcode) && size > fromInteger(valueOf(dataW)) ? size[high:low] : 1;
+    hasDataA(msg.opcode) && size > fromInteger(valueOf(dataW)/8) ? size[high:low] : 1;
 
   Reg#(Bool) first <- mkReg(True);
 
@@ -350,17 +351,17 @@ module mkDecreaseWidthChannelC#(
 
   let msg = master.first;
 
-  Vector#(ratio,Byte#(dataW)) data = unpack(msg.data);
+  Vector#(ratio,Bit#(dataW)) data = unpack(msg.data);
 
   Reg#(Token#(ratio)) indexReg <- mkReg(0);
 
-  Integer low = log2(valueOf(dataW));
+  Integer low = log2(valueOf(dataW)/8);
   Integer high = low + log2(valueOf(ratio)) - 1;
 
   TLSize size = 1 << msg.size;
   Token#(ratio) firstIndex = msg.address[high:low];
   Token#(ratio) length =
-    hasDataC(msg.opcode) && size > fromInteger(valueOf(dataW)) ? size[high:low] : 1;
+    hasDataC(msg.opcode) && size > fromInteger(valueOf(dataW)/8) ? size[high:low] : 1;
 
   Reg#(Bool) first <- mkReg(True);
 
@@ -395,19 +396,19 @@ module mkDecreaseWidthChannelD#(
 
   let msg = master.first;
 
-  Vector#(ratio,Byte#(dataW)) data = unpack(msg.data);
+  Vector#(ratio,Bit#(dataW)) data = unpack(msg.data);
 
   Reg#(Token#(ratio)) indexReg <- mkReg(0);
 
   RegFile#(Bit#(sourceW), Token#(ratio)) indexes <- mkRegFileFull;
 
-  Integer low = log2(valueOf(dataW));
+  Integer low = log2(valueOf(dataW)/8);
   Integer high = low + log2(valueOf(ratio)) - 1;
 
   TLSize size = 1 << msg.size;
   Token#(ratio) firstIndex = indexes.sub(msg.source);
   Token#(ratio) length =
-    hasDataD(msg.opcode) && size > fromInteger(valueOf(dataW)) ? size[high:low] : 1;
+    hasDataD(msg.opcode) && size > fromInteger(valueOf(dataW)/8) ? size[high:low] : 1;
 
   Reg#(Bool) isFirst <- mkReg(True);
 

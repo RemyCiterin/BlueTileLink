@@ -50,7 +50,7 @@ module mkMshr#(
     TLSlave#(`TL_ARGS) slave,
     ArbiterClient_IFC arbiter,
     ReleaseFSM#(Bit#(indexW), `TL_ARGS) releaseM,
-    Bram#(Bit#(indexW), Byte#(dataW)) bram
+    Bram#(Bit#(indexW), Bit#(dataW)) bram
   ) (Mshr#(indexW, `TL_ARGS));
 
   AcquireFSM#(Bit#(indexW), `TL_ARGS) acquireM <- mkAcquireFSM(logSize, slave, arbiter, bram);
@@ -138,7 +138,7 @@ module mkMshrFile#(
     Bit#(sizeW) logSize,
     ArbiterClient_IFC readArbiter,
     ArbiterClient_IFC writeArbiter,
-    Bram#(Bit#(indexW), Byte#(dataW)) bram
+    Bram#(Bit#(indexW), Bit#(dataW)) bram
   ) (MshrFile#(mshr,indexW,`TL_ARGS));
 
   Fifo#(mshr, ChannelA#(`TL_ARGS)) fifoA <- mkFifo;

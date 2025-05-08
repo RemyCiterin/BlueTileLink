@@ -208,8 +208,8 @@ typedef struct {
   Bit#(sizeW) size;
   Bit#(sourceW) source;
   Bit#(addrW) address;
-  Bit#(dataW) mask;
-  Byte#(dataW) data;
+  Bit#(TDiv#(dataW,8)) mask;
+  Bit#(dataW) data;
 } ChannelA#(`TL_ARGS_DECL) deriving(Bits, FShow, Eq);
 
 typedef struct {
@@ -224,7 +224,7 @@ typedef struct {
   Bit#(sizeW) size;
   Bit#(sourceW) source;
   Bit#(addrW) address;
-  Byte#(dataW) data;
+  Bit#(dataW) data;
 } ChannelC#(`TL_ARGS_DECL) deriving(Bits, FShow, Eq);
 
 typedef struct {
@@ -232,7 +232,7 @@ typedef struct {
   Bit#(sizeW) size;
   Bit#(sourceW) source;
   Bit#(sinkW) sink;
-  Byte#(dataW) data;
+  Bit#(dataW) data;
 } ChannelD#(`TL_ARGS_DECL) deriving(Bits, FShow, Eq);
 
 typedef struct {
@@ -310,7 +310,7 @@ module mkVectorTLSlave#(TLSlave#(`TL_ARGS) slave) (Vector#(n, TLSlave#(`TL_ARGS)
   Reg#(Bit#(TLog#(n))) stateA <- mkReg(0);
   Reg#(Bit#(TLog#(n))) stateC <- mkReg(0);
 
-  Bit#(sizeW) logDataW = fromInteger(valueOf(TLog#(dataW)));
+  Bit#(sizeW) busSize = fromInteger(log2(valueOf(dataW)/8));
 
   Vector#(n, TLSlave#(`TL_ARGS)) ret = newVector;
 
@@ -325,11 +325,11 @@ module mkVectorTLSlave#(TLSlave#(`TL_ARGS) slave) (Vector#(n, TLSlave#(`TL_ARGS)
             Bool first = sizeA == 0;
             Bool last =
               !hasDataA(msg.opcode) ||
-              sizeA == fromInteger(valueOf(dataW)) ||
-              (sizeA == 0 && logDataW >= msg.size);
+              sizeA == fromInteger(valueOf(dataW)/8) ||
+              (sizeA == 0 && busSize >= msg.size);
 
             let size = first ? 1 << msg.size : sizeA;
-            sizeA <= last ? 0 : size - fromInteger(valueOf(dataW));
+            sizeA <= last ? 0 : size - fromInteger(valueOf(dataW)/8);
             stateA <= fromInteger(i);
 
             slave.channelA.enq(msg);
@@ -346,11 +346,11 @@ module mkVectorTLSlave#(TLSlave#(`TL_ARGS) slave) (Vector#(n, TLSlave#(`TL_ARGS)
             Bool first = sizeC == 0;
             Bool last =
               !hasDataC(msg.opcode) ||
-              sizeC == fromInteger(valueOf(dataW)) ||
-              (sizeC == 0 && logDataW >= msg.size);
+              sizeC == fromInteger(valueOf(dataW)/8) ||
+              (sizeC == 0 && busSize >= msg.size);
 
             let size = first ? 1 << msg.size : sizeC;
-            sizeC <= last ? 0 : size - fromInteger(valueOf(dataW));
+            sizeC <= last ? 0 : size - fromInteger(valueOf(dataW)/8);
             stateC <= fromInteger(i);
 
             slave.channelC.enq(msg);
@@ -427,8 +427,8 @@ interface MetaChannelA#(`TL_ARGS_DECL);
 endinterface
 
 module mkMetaChannelA#(FifoO#(ChannelA#(`TL_ARGS)) master) (MetaChannelA#(`TL_ARGS));
-  Bit#(sizeW) dataLogSize = fromInteger(valueOf(TLog#(dataW)));
-  TLSize dataSize = fromInteger(valueOf(dataW));
+  Bit#(sizeW) logBusWiSize = fromInteger(log2(valueOf(dataW)/8));
+  TLSize busSize = fromInteger(valueOf(dataW)/8);
 
   OpcodeA opcode = master.first.opcode;
 
@@ -440,7 +440,7 @@ module mkMetaChannelA#(FifoO#(ChannelA#(`TL_ARGS)) master) (MetaChannelA#(`TL_AR
   TLSize sz = isFirst ? 1 << master.first.size : sizeReg;
 
   Bool isLast =
-    dataSize >= sz || !hasDataA(opcode);
+    busSize >= sz || !hasDataA(opcode);
 
   interface FifoO channel;
     method first = master.first;
@@ -450,19 +450,19 @@ module mkMetaChannelA#(FifoO#(ChannelA#(`TL_ARGS)) master) (MetaChannelA#(`TL_AR
       action
         master.deq;
         isFirst <= isLast;
-        addrReg <= addr + fromInteger(valueOf(dataW));
-        sizeReg <= sz - dataSize;
+        addrReg <= addr + fromInteger(valueOf(dataW)/8);
+        sizeReg <= sz - busSize;
       endaction
     endmethod
   endinterface
 
   method address = when(master.canDeq, addr);
 
-  method nextAddress = when(master.canDeq, addr + fromInteger(valueOf(dataW)));
+  method nextAddress = when(master.canDeq, addr + fromInteger(valueOf(dataW)/8));
 
   method size = when(master.canDeq, sz);
 
-  method nextSize = when(master.canDeq, isLast ? 0 : sz - dataSize);
+  method nextSize = when(master.canDeq, isLast ? 0 : sz - busSize);
 
   method first = when(master.canDeq, isFirst);
 
@@ -493,8 +493,8 @@ interface MetaChannelC#(`TL_ARGS_DECL);
 endinterface
 
 module mkMetaChannelC#(FifoO#(ChannelC#(`TL_ARGS)) master) (MetaChannelC#(`TL_ARGS));
-  Bit#(sizeW) dataLogSize = fromInteger(valueOf(TLog#(dataW)));
-  TLSize dataSize = fromInteger(valueOf(dataW));
+  Bit#(sizeW) logBusWiSize = fromInteger(log2(valueOf(dataW)/8));
+  TLSize busSize = fromInteger(valueOf(dataW)/8);
 
   OpcodeC opcode = master.first.opcode;
 
@@ -506,7 +506,7 @@ module mkMetaChannelC#(FifoO#(ChannelC#(`TL_ARGS)) master) (MetaChannelC#(`TL_AR
   TLSize sz = isFirst ? 1 << master.first.size : sizeReg;
 
   Bool isLast =
-    dataSize >= sz || !hasDataC(opcode);
+    busSize >= sz || !hasDataC(opcode);
 
   interface FifoO channel;
     method first = master.first;
@@ -516,19 +516,19 @@ module mkMetaChannelC#(FifoO#(ChannelC#(`TL_ARGS)) master) (MetaChannelC#(`TL_AR
       action
         master.deq;
         isFirst <= isLast;
-        addrReg <= addr + fromInteger(valueOf(dataW));
-        sizeReg <= sz - dataSize;
+        addrReg <= addr + fromInteger(valueOf(dataW)/8);
+        sizeReg <= sz - busSize;
       endaction
     endmethod
   endinterface
 
   method address = when(master.canDeq, addr);
 
-  method nextAddress = when(master.canDeq, addr + fromInteger(valueOf(dataW)));
+  method nextAddress = when(master.canDeq, addr + fromInteger(valueOf(dataW)/8));
 
   method size = when(master.canDeq, sz);
 
-  method nextSize = when(master.canDeq, isLast ? 0 : sz - dataSize);
+  method nextSize = when(master.canDeq, isLast ? 0 : sz - busSize);
 
   method first = when(master.canDeq, isFirst);
 
@@ -554,8 +554,8 @@ interface MetaChannelD#(`TL_ARGS_DECL);
 endinterface
 
 module mkMetaChannelD#(FifoO#(ChannelD#(`TL_ARGS)) master) (MetaChannelD#(`TL_ARGS));
-  Bit#(sizeW) dataLogSize = fromInteger(valueOf(TLog#(dataW)));
-  TLSize dataSize = fromInteger(valueOf(dataW));
+  Bit#(sizeW) logBusWiSize = fromInteger(log2(valueOf(dataW)/8));
+  TLSize busSize = fromInteger(valueOf(dataW)/8);
 
   OpcodeD opcode = master.first.opcode;
 
@@ -565,7 +565,7 @@ module mkMetaChannelD#(FifoO#(ChannelD#(`TL_ARGS)) master) (MetaChannelD#(`TL_AR
   TLSize sz = isFirst ? 1 << master.first.size : sizeReg;
 
   Bool isLast =
-    dataSize >= sz || !hasDataD(opcode);
+    busSize >= sz || !hasDataD(opcode);
 
   interface FifoO channel;
     method first = master.first;
@@ -575,14 +575,14 @@ module mkMetaChannelD#(FifoO#(ChannelD#(`TL_ARGS)) master) (MetaChannelD#(`TL_AR
       action
         master.deq;
         isFirst <= isLast;
-        sizeReg <= sz - dataSize;
+        sizeReg <= sz - busSize;
       endaction
     endmethod
   endinterface
 
   method size = when(master.canDeq, sz);
 
-  method nextSize = when(master.canDeq, isLast ? 0 : sz - dataSize);
+  method nextSize = when(master.canDeq, isLast ? 0 : sz - busSize);
 
   method first = when(master.canDeq, isFirst);
 

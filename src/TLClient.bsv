@@ -42,23 +42,23 @@ typedef enum {
 
 interface AcquireBuffer#(`TL_ARGS_DECL);
   // Write into the buffer a beat from a cache due to a probe request
-  method Action enqProbe(Byte#(dataW) value);
+  method Action enqProbe(Bit#(dataW) value);
 
   // Write into the buffer a beat from memory
-  method Action enqMem(Byte#(dataW) value);
+  method Action enqMem(Bit#(dataW) value);
 
   // Read one word from the buffer
-  method ActionValue#(Byte#(dataW)) deq;
+  method ActionValue#(Bit#(dataW)) deq;
 
   // Start a new transaction
   method Action start;
 endinterface
 
 module mkAcquireBuffer#(Bit#(sizeW) logSize) (AcquireBuffer#(`TL_ARGS));
-  Bit#(sizeW) logDataW = fromInteger(valueOf(TLog#(dataW)));
-  Bit#(addrW) maxOffset = (1 << (logSize - logDataW)) - 1;
+  Bit#(sizeW) logBusSize = fromInteger(log2(valueOf(dataW)/8));
+  Bit#(addrW) maxOffset = (1 << (logSize - logBusSize)) - 1;
 
-  RegFile#(Bit#(addrW), Maybe#(Byte#(dataW))) buffer <- mkRegFile(0, maxOffset);
+  RegFile#(Bit#(addrW), Maybe#(Bit#(dataW))) buffer <- mkRegFile(0, maxOffset);
 
   function Bit#(addrW) next(Bit#(addrW) idx) = idx == maxOffset ? 0 : idx + 1;
   Reg#(Maybe#(Bit#(addrW))) memHead <- mkReg(Invalid);
@@ -75,14 +75,14 @@ module mkAcquireBuffer#(Bit#(sizeW) logSize) (AcquireBuffer#(`TL_ARGS));
       isInit <= True;
   endrule
 
-  method Action enqProbe(Byte#(dataW) value) if (isInit);
+  method Action enqProbe(Bit#(dataW) value) if (isInit);
     action
       buffer.upd(probeHead, Valid(value));
       probeHead <= next(probeHead);
     endaction
   endmethod
 
-  method Action enqMem(Byte#(dataW) value)
+  method Action enqMem(Bit#(dataW) value)
     if (isInit &&& memHead matches tagged Valid .head);
     action
       if (buffer.sub(head) == Invalid && deqHead <= head)
@@ -92,7 +92,7 @@ module mkAcquireBuffer#(Bit#(sizeW) logSize) (AcquireBuffer#(`TL_ARGS));
     endaction
   endmethod
 
-  method ActionValue#(Byte#(dataW)) deq
+  method ActionValue#(Bit#(dataW)) deq
     if (buffer.sub(deqHead) matches tagged Valid .data);
     buffer.upd(deqHead, Invalid);
     deqHead <= next(deqHead);
@@ -120,7 +120,7 @@ module mkTileLinkClientFSM#(
 
   Reg#(Bool) waitAccessAck <- mkReg(False);
 
-  Bit#(sizeW) logDataW = fromInteger(valueOf(TLog#(dataW)));
+  Bit#(sizeW) logBusSize = fromInteger(log2(valueOf(dataW)/8));
 
   function Bit#(addrW) align(Bit#(addrW) address);
     return address & ~((1 << logSize) - 1);
@@ -223,10 +223,10 @@ module mkTileLinkClientFSM#(
     buffer.enqMem(slave.channelD.first.data);
     slave.channelD.deq;
 
-    fillSize[0] <= fillSize[0] - fromInteger(valueOf(dataW));
-    fillAddr[0] <= fillAddr[0] + fromInteger(valueOf(dataW));
+    fillSize[0] <= fillSize[0] - fromInteger(valueOf(dataW)/8);
+    fillAddr[0] <= fillAddr[0] + fromInteger(valueOf(dataW)/8);
 
-    if (fillSize[0] == fromInteger(valueOf(dataW))) begin
+    if (fillSize[0] == fromInteger(valueOf(dataW)/8)) begin
       needFill[0] <= False;
     end
   endrule
@@ -248,7 +248,7 @@ module mkTileLinkClientFSM#(
   rule sendGrant if (state == GRANT_BURST);
     let data <- buffer.deq;
 
-    Bool last = grantSize == fromInteger(valueOf(dataW));
+    Bool last = grantSize == fromInteger(valueOf(dataW)/8);
 
     master.channelD.enq(ChannelD{
       opcode: GrantData(probeM.exclusive ? T : B),
@@ -262,7 +262,7 @@ module mkTileLinkClientFSM#(
       state <= GRANT_WAIT;
     end
 
-    grantSize <= grantSize - fromInteger(valueOf(dataW));
+    grantSize <= grantSize - fromInteger(valueOf(dataW)/8);
   endrule
 
   rule receiveGrantAck
@@ -318,9 +318,9 @@ module mkTileLinkClientFSM#(
       mask: -1
     });
 
-    releaseAddr <= addr + fromInteger(valueOf(dataW));
-    releaseSize <= size - fromInteger(valueOf(dataW));
-    Bool last = size == fromInteger(valueOf(dataW));
+    releaseAddr <= addr + fromInteger(valueOf(dataW)/8);
+    releaseSize <= size - fromInteger(valueOf(dataW)/8);
+    Bool last = size == fromInteger(valueOf(dataW)/8);
 
     if (last) begin
       master.channelD.enq(ChannelD{
@@ -358,7 +358,7 @@ interface ProbeFSM#(numeric type indexW, numeric type nSource, `TL_ARGS_DECL);
   method Action start(Bit#(indexW) idx, OpcodeB op, Bit#(addrW) addr, Bit#(nSource) owners);
 
   // Write a received data lane to the response buffer
-  method ActionValue#(Tuple3#(Bit#(indexW), Byte#(dataW), Bool)) write;
+  method ActionValue#(Tuple3#(Bit#(indexW), Bit#(dataW), Bool)) write;
 
   // Return if any agent still own the data
   method Bool exclusive;
@@ -382,7 +382,7 @@ module mkProbeFSM#(
   let message = channelC.first;
 
   sourceIdx numSource = fromInteger(valueOf(nSource));
-  Bit#(sizeW) logDataW = fromInteger(valueOf(TLog#(dataW)));
+  Bit#(sizeW) logBusSize = fromInteger(log2(valueOf(dataW)/8));
 
   Reg#(Bit#(addrW)) address <- mkReg(?);
   Reg#(Bool) exc <- mkReg(True);
@@ -435,7 +435,7 @@ module mkProbeFSM#(
     toSend[idx] <= 0;
   endrule
 
-  method ActionValue#(Tuple3#(Bit#(indexW), Byte#(dataW), Bool)) write
+  method ActionValue#(Tuple3#(Bit#(indexW), Bit#(dataW), Bool)) write
     if (message.opcode matches tagged ProbeAckData .reduce);
 
     let idx = findSource(message.source);

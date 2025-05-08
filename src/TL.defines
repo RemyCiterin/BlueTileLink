@@ -11,7 +11,7 @@
                 sinkW
 
 `define TL_ARGS_DEFAULT 32, \
-                        4, \
+                        32, \
                         3, \
                         2, \
                         2

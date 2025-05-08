@@ -23,7 +23,7 @@ module mkCPU(Empty);
 endmodule
 
 typedef 32 AddrW;
-typedef 4 DataW;
+typedef 32 DataW;
 typedef 8 SizeW;
 typedef 8 SourceW;
 typedef 4 SinkW;
@@ -116,11 +116,11 @@ module mkTestNBCache#(Vector#(TAdd#(MSHR,1), Bit#(SourceW)) sources)
 
   mkAutoFSM(main);
 
-  Fifo#(2, ChannelA#(32,2,8,8,4)) fifoA <- mkFifo;
-  Fifo#(2, ChannelB#(32,2,8,8,4)) fifoB <- mkFifo;
-  Fifo#(2, ChannelC#(32,2,8,8,4)) fifoC <- mkFifo;
-  Fifo#(2, ChannelD#(32,2,8,8,4)) fifoD <- mkFifo;
-  Fifo#(2, ChannelE#(32,2,8,8,4)) fifoE <- mkFifo;
+  Fifo#(2, ChannelA#(32,16,8,8,4)) fifoA <- mkFifo;
+  Fifo#(2, ChannelB#(32,16,8,8,4)) fifoB <- mkFifo;
+  Fifo#(2, ChannelC#(32,16,8,8,4)) fifoC <- mkFifo;
+  Fifo#(2, ChannelD#(32,16,8,8,4)) fifoD <- mkFifo;
+  Fifo#(2, ChannelE#(32,16,8,8,4)) fifoE <- mkFifo;
 
   mkDecreaseWidth(True, cache.master, interface TLSlave;
     interface channelA = toFifoI(fifoA);
@@ -130,11 +130,11 @@ module mkTestNBCache#(Vector#(TAdd#(MSHR,1), Bit#(SourceW)) sources)
     interface channelE = toFifoI(fifoE);
   endinterface);
 
-  Fifo#(2, ChannelA#(32,4,8,8,4)) outA <- mkFifo;
-  Fifo#(2, ChannelB#(32,4,8,8,4)) outB <- mkFifo;
-  Fifo#(2, ChannelC#(32,4,8,8,4)) outC <- mkFifo;
-  Fifo#(2, ChannelD#(32,4,8,8,4)) outD <- mkFifo;
-  Fifo#(2, ChannelE#(32,4,8,8,4)) outE <- mkFifo;
+  Fifo#(2, ChannelA#(32,32,8,8,4)) outA <- mkFifo;
+  Fifo#(2, ChannelB#(32,32,8,8,4)) outB <- mkFifo;
+  Fifo#(2, ChannelC#(32,32,8,8,4)) outC <- mkFifo;
+  Fifo#(2, ChannelD#(32,32,8,8,4)) outD <- mkFifo;
+  Fifo#(2, ChannelE#(32,32,8,8,4)) outE <- mkFifo;
 
   mkIncreaseWidth(True, interface TLMaster;
     interface channelA = toFifoO(fifoA);
@@ -315,7 +315,7 @@ module mkCPU_SIM(Empty);
     interface channelE = toFifoO(channelE);
   endinterface;
 
-  BramBE#(Bit#(32), 4) rom <- mkSizedBramInitBE(4096, 0);
+  BramBE#(Bit#(32), 32) rom <- mkSizedBramInitBE(4096, 0);
 
   Bit#(sizeW) logSize = 6;
 

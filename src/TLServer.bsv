@@ -72,7 +72,7 @@ module mkAcquireFSM#(
     Bit#(sizeW) logSize,
     TLSlave#(`TL_ARGS) slave,
     ArbiterClient_IFC arbiter,
-    Bram#(Bit#(indexW), Byte#(dataW)) bram
+    Bram#(Bit#(indexW), Bit#(dataW)) bram
   ) (AcquireFSM#(Bit#(indexW), `TL_ARGS));
 
   MetaChannelD#(`TL_ARGS) metaD <- mkMetaChannelD(slave.channelD);
@@ -163,7 +163,7 @@ module mkAcquireFSM#(
   function Action doAcquire(OpcodeA opcode, Bit#(indexW) idx, Bit#(addrW) addr);
     action
       doAssert(
-        logSize >= fromInteger(valueOf(TLog#(dataW))),
+        logSize >= fromInteger(log2(valueOf(dataW)/8)),
         "The size of an acquire request must be bigger than the bus width"
       );
 
@@ -238,7 +238,7 @@ endinterface
 module mkBurstFSM#(
     TLSlave#(`TL_ARGS) slave,
     ArbiterClient_IFC arbiter,
-    Bram#(Bit#(indexW), Byte#(dataW)) bram
+    Bram#(Bit#(indexW), Bit#(dataW)) bram
   ) (BurstFSM#(Bit#(indexW), `TL_ARGS));
 
   Reg#(Bit#(sourceW)) source <- mkReg(?);
@@ -272,7 +272,7 @@ module mkBurstFSM#(
     msg.data = data;
 
     slave.channelC.enq(msg);
-    size[0] <= size[0] - fromInteger(valueOf(dataW));
+    size[0] <= size[0] - fromInteger(valueOf(dataW)/8);
     index[0] <= index[0] + 1;
   endrule
 
@@ -321,7 +321,7 @@ module mkBurstFSM#(
       message <= msg;
 
       doAssert(
-        logSize >= fromInteger(valueOf(TLog#(dataW))),
+        logSize >= fromInteger(log2(valueOf(dataW)/8)),
         "Burst sender: release and probe size must be bigger than the bus width"
       );
 
@@ -392,7 +392,7 @@ module mkReleaseFSM#(
     Bit#(sizeW) logSize,
     TLSlave#(`TL_ARGS) slave,
     ArbiterClient_IFC arbiter,
-    Bram#(Bit#(indexW), Byte#(dataW)) bram
+    Bram#(Bit#(indexW), Bit#(dataW)) bram
   ) (ReleaseFSM#(Bit#(indexW), `TL_ARGS));
 
   Reg#(ChannelB#(`TL_ARGS)) message <- mkReg(?);

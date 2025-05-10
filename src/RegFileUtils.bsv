@@ -1,6 +1,30 @@
 import RevertingVirtualReg :: *;
 import RegFile :: *;
 
+module mkRegFileInit#(Bit#(n) lo, Bit#(n) hi, a init) (RegFile#(Bit#(n), a)) provisos(Bits#(a, sa));
+  Reg#(Bool) is_init <- mkReg(hi < lo);
+  Reg#(Bit#(n)) idx <- mkReg(lo);
+
+  RegFile#(Bit#(n), a) rf <- mkRegFile(lo,hi);
+
+  rule init_register_file if (!is_init);
+    rf.upd(idx, init);
+
+    if (idx >= hi)
+      is_init <= True;
+    else
+      idx <= idx + 1;
+  endrule
+
+  method a sub(Bit#(n) index) if (is_init);
+    return rf.sub(index);
+  endmethod
+
+  method Action upd(Bit#(n) index, a val) if (is_init);
+    rf.upd(index, val);
+  endmethod
+endmodule
+
 module mkRegFileFullInit#(a init) (RegFile#(Bit#(n), a)) provisos(Bits#(a, sa));
   Reg#(Bool) is_init <- mkReg(False);
   Reg#(Bit#(n)) idx <- mkReg(0);

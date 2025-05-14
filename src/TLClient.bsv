@@ -20,25 +20,19 @@ typedef enum {
   IDLE = 0,
 
   // Send probe requests, and wait for response
-  PROBE_WAIT = 1,
+  PROBE = 1,
 
   // Wait for a grant response
   GRANT_WAIT = 2,
 
-  // Receive a probe burst
-  PROBE_BURST = 3,
-
   // Send a grant burst
-  GRANT_BURST = 4,
+  GRANT_BURST = 3,
 
   // Receive a put burst
-  PUT_BURST = 5,
+  PUT_BURST = 4,
 
   // Send a get burst
-  GET_BURST = 6,
-
-  // Receive a release burst
-  RELEASE_BURST = 7
+  GET_BURST = 5
 } TLClientState deriving(FShow, Eq, Bits);
 
 // A simple TileLink snoop controller
@@ -51,7 +45,8 @@ module mkTileLinkClientFSM#(
     Vector#(nSource, Bit#(sourceW)) sources
   ) (Empty) provisos (Alias#(Bit#(TAdd#(1, TLog#(nSource))), sourceIdx));
 
-  Reg#(Bool) waitAccessAck <- mkReg(False);
+  //Reg#(Bool) waitAccessAck <- mkReg(False);
+  Reg#(Bit#(8)) waitAccessAck <- mkReg(0);
 
   Bit#(sizeW) logBusSize = fromInteger(log2(valueOf(dataW)/8));
 
@@ -60,12 +55,9 @@ module mkTileLinkClientFSM#(
   endfunction
 
   Reg#(TLClientState) state <- mkReg(IDLE);
-  Reg#(TLClientState) nextState <- mkReg(IDLE);
 
   Reg#(ChannelA#(`TL_ARGS)) channelA <- mkReg(?);
   Reg#(TLPerm) acquirePerm <- mkReg(?);
-
-  //AcquireBuffer#(`TL_ARGS) buffer <- mkAcquireBuffer(logSize);
 
   function Action startGrant();
     action
@@ -78,13 +70,13 @@ module mkTileLinkClientFSM#(
     endaction
   endfunction
 
-  // Release state
-  Reg#(TLSize) releaseSize <- mkReg(0);
-  Reg#(Bit#(addrW)) releaseAddr <- mkReg(0);
-
   sourceIdx numSource = fromInteger(valueOf(nSource));
 
-  ProbeFSM#(addrW, nSource, `TL_ARGS) probeM <- mkProbeFSM(logSize, master, sources);
+  let metaC <- mkMetaChannelC(master.channelC);
+  let channelC = metaC.channel;
+
+  ProbeFSM#(addrW, nSource, `TL_ARGS) probeM <-
+    mkProbeFSM(logSize, master.channelB, metaC, sources);
 
   Bit#(addrW) maxOffset = (1 << (logSize - logBusSize)) - 1;
   RegFile#(Bit#(addrW), Bit#(dataW)) dataBuf <- mkRegFile(0, maxOffset);
@@ -98,7 +90,7 @@ module mkTileLinkClientFSM#(
   Reg#(Bit#(addrW)) fillAddr <- mkReg(0);
   Reg#(Bit#(addrW)) fillSize <- mkReg(0);
 
-  rule receiveChannelA if (state == IDLE && !waitAccessAck);
+  rule receiveChannelA if (state == IDLE);
     let msg = master.channelA.first;
     epoch <= epoch + 1;
 
@@ -124,17 +116,12 @@ module mkTileLinkClientFSM#(
     if (numSource > 1) begin
       Cap cap = permChannelA(msg.opcode) == T ? N : B;
       probeM.start(0, ProbeBlock(cap), align(msg.address), srcs);
-      state <= PROBE_WAIT;
+      state <= PROBE;
     end else
       state <= GRANT_BURST;
   endrule
 
-  rule probeWrite
-    if (
-      (state == PROBE_WAIT || state == PROBE_BURST) &&
-      (!waitAccessAck || state == PROBE_BURST)
-    );
-
+  rule probeWrite if (waitAccessAck != maxBound || !metaC.first);
     match {.index, .data, .last} <- probeM.write;
 
     dataBuf.upd(index, data);
@@ -148,9 +135,7 @@ module mkTileLinkClientFSM#(
       mask: -1
     });
 
-    waitAccessAck <= True;
-
-    state <= last ? PROBE_WAIT : PROBE_BURST;
+    if (metaC.first) waitAccessAck <= waitAccessAck + 1;
   endrule
 
   (* preempts = "probeWrite,rresponseMEM" *)
@@ -169,7 +154,8 @@ module mkTileLinkClientFSM#(
     fillAddr <= fillAddr + 1;
   endrule
 
-  rule toGrant if (state == PROBE_WAIT);
+  // Ensure that we wait the previous write requests before reading the cache block
+  rule toGrant if (state == PROBE && (probeM.receiveData || waitAccessAck == 0));
     state <= GRANT_BURST;
     probeM.finish;
 
@@ -215,13 +201,13 @@ module mkTileLinkClientFSM#(
     state <= IDLE;
   endrule
 
+  // TODO: ensure that we receive GrantAck before release for a same address
   rule receiveRelease if (
-      (state == IDLE || state == PROBE_WAIT) &&&
-      master.channelC.first.opcode matches tagged Release .*
+      metaC.channel.first.opcode matches tagged Release .*
     );
 
-    master.channelC.deq;
-    let msg = master.channelC.first;
+    channelC.deq;
+    let msg = channelC.first;
 
     doAssert(msg.size == logSize, "Invalid channel C request size");
 
@@ -234,35 +220,27 @@ module mkTileLinkClientFSM#(
     });
   endrule
 
+  // TODO: ensure that we receive GrantAck before release for a same address
   rule receiveReleaseData if (
-      (state == IDLE || state == PROBE_WAIT || state == RELEASE_BURST) &&&
-      master.channelC.first.opcode matches tagged ReleaseData .* &&&
-      (!waitAccessAck || state == RELEASE_BURST)
+      channelC.first.opcode matches tagged ReleaseData .* &&&
+      (waitAccessAck != maxBound || !metaC.first)
     );
 
-    master.channelC.deq;
-    let msg = master.channelC.first;
-    TLSize size = state == RELEASE_BURST ? releaseSize : 1 << msg.size;
-    Bit#(addrW) addr = state == RELEASE_BURST ? releaseAddr : msg.address;
-    Bool first = state != RELEASE_BURST;
-
+    channelC.deq;
+    let msg = channelC.first;
     doAssert(msg.size == logSize, "Invalid channel C request size");
 
-    if (first) waitAccessAck <= True;
+    if (metaC.first) waitAccessAck <= waitAccessAck + 1;
     slave.channelA.enq(ChannelA{
+      address: metaC.address,
       opcode: PutData,
       data: msg.data,
-      address: addr,
       size: logSize,
       source: sink,
       mask: -1
     });
 
-    releaseAddr <= addr + fromInteger(valueOf(dataW)/8);
-    releaseSize <= size - fromInteger(valueOf(dataW)/8);
-    Bool last = size == fromInteger(valueOf(dataW)/8);
-
-    if (last) begin
+    if (metaC.last) begin
       master.channelD.enq(ChannelD{
         opcode: ReleaseAck,
         source: msg.source,
@@ -271,23 +249,16 @@ module mkTileLinkClientFSM#(
         data: ?
       });
     end
-
-    if (first && !last) begin
-      state <= RELEASE_BURST;
-      nextState <= state;
-    end else if (last && !first) begin
-      state <= nextState;
-    end
   endrule
 
   rule sendReleaseAck if (
       slave.channelD.first.source == sink &&
       slave.channelD.first.opcode == AccessAck &&
-      waitAccessAck
+      waitAccessAck > 0
     );
 
     slave.channelD.deq;
-    waitAccessAck <= False;
+    waitAccessAck <= waitAccessAck - 1;
   endrule
 endmodule
 
@@ -312,12 +283,12 @@ endinterface
 
 module mkProbeFSM#(
     Bit#(sizeW) logSize,
-    TLMaster#(`TL_ARGS) master,
+    FifoI#(ChannelB#(`TL_ARGS)) channelB,
+    MetaChannelC#(`TL_ARGS) metaC,
     Vector#(nSource, Bit#(sourceW)) sources
   ) (ProbeFSM#(indexW, nSource, `TL_ARGS))
   provisos (Alias#(Bit#(TAdd#(1, TLog#(nSource))), sourceIdx));
 
-  let metaC <- mkMetaChannelC(master.channelC);
   let channelC = metaC.channel;
   let message = channelC.first;
 
@@ -347,7 +318,7 @@ module mkProbeFSM#(
   endfunction
 
   rule receiveProbeAck
-    if (message.opcode matches tagged ProbeAck .reduce);
+    if (message.opcode matches tagged ProbeAck .reduce &&& message.address == address);
 
     let idx = findSource(message.source);
     doAssert(toReceive[idx] == 1, "Receive two ProbeAck from the same source");
@@ -371,12 +342,12 @@ module mkProbeFSM#(
       size: logSize
     };
 
-    master.channelB.enq(msg);
+    channelB.enq(msg);
     toSend[idx] <= 0;
   endrule
 
   method ActionValue#(Tuple3#(Bit#(indexW), Bit#(dataW), Bool)) write
-    if (message.opcode matches tagged ProbeAckData .reduce);
+    if (message.opcode matches tagged ProbeAckData .reduce &&& message.address == address);
 
     let idx = findSource(message.source);
     doAssert(toReceive[idx] == 1, "Receive two ProbeAckData from the same source");

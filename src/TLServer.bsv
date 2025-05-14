@@ -525,3 +525,106 @@ module mkReleaseFSM#(
   method reduce = reduceReg;
   method address = addrReg;
 endmodule
+
+interface GetFSM#(type indexT, `TL_ARGS_DECL);
+  method Action setSource(Bit#(sourceW) source);
+
+  method Action getBlock(Grow grow, indexT idx, Bit#(addrW) addr, Bit#(sizeW) size);
+  method Action getAck();
+  method Bool canGetAck;
+
+  // Return if their is currently an acquire request
+  method Bool active;
+
+  // Return the address of the current (or last) acquire sequence
+  method Bit#(addrW) address;
+endinterface
+
+module mkGetFSM#(
+    TLSlave#(`TL_ARGS) slave,
+    ArbiterClient_IFC arbiter,
+    BramBE#(Bit#(indexW), dataW) bram
+  ) (GetFSM#(Bit#(indexW), `TL_ARGS));
+
+  MetaChannelD#(`TL_ARGS) metaD <- mkMetaChannelD(slave.channelD);
+  let channelD = metaD.channel;
+
+  // Current index we use to write in `bram`
+  Ehr#(2,Bit#(indexW)) index <- mkEhr(?);
+
+  Reg#(Bit#(sourceW)) source <- mkReg(?);
+  Reg#(Bool) started <- mkReg(False);
+
+  // true if the module is doing an acquire transfers
+  Reg#(Bool) valid <- mkReg(False);
+  Reg#(Bool) last <- mkReg(False);
+
+  Reg#(Bit#(addrW)) addrReg <- mkReg(?);
+  Reg#(Bit#(sizeW)) size <- mkReg(?);
+
+  rule arbiterRequest
+    if (
+      channelD.first.opcode == AccessAckData &&
+      channelD.first.source == source
+    );
+
+    arbiter.request();
+  endrule
+
+  rule receiveAccessAckData
+    if (
+      channelD.first.opcode == AccessAckData &&
+      channelD.first.source == source &&
+      arbiter.grant
+    );
+
+    if (verbose)
+      $display("Server: %d ", index[0], fshow(channelD.first));
+
+    channelD.deq();
+
+    Bit#(TLog#(TDiv#(dataW,8))) offset = addrReg[log2(valueOf(dataW)/8):0];
+    Bit#(TDiv#(dataW,8)) mask = (1 << (TLSize'(1) << size)) - 1;
+    mask = mask << offset;
+
+    bram.write(index[0], channelD.first.data, mask);
+
+    index[0] <= index[0] + 1;
+    last <= metaD.last;
+  endrule
+
+  method Action setSource(Bit#(sourceW) src)
+    if (!started);
+    action
+      started <= True;
+      source <= src;
+    endaction
+  endmethod
+
+  method Action getBlock(Grow grow, Bit#(indexW) idx, Bit#(addrW) addr, Bit#(sizeW) sz)
+    if (started && !valid);
+    action
+      addrReg <= addr;
+      slave.channelA.enq(ChannelA{
+        opcode: GetFull,
+        source: source,
+        address: addr,
+        size: sz,
+        data: ?,
+        mask: ?
+      });
+      index[1] <= idx;
+      valid <= True;
+      size <= sz;
+    endaction
+  endmethod
+
+  method Action getAck if (last);
+    valid <= False;
+    last <= False;
+  endmethod
+
+  method Bool canGetAck = started && valid && last;
+  method Bit#(addrW) address = addrReg;
+  method Bool active = valid;
+endmodule

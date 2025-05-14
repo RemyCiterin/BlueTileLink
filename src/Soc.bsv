@@ -99,11 +99,11 @@ module mkTestNBCache#(Vector#(TAdd#(MSHR,1), Bit#(SourceW)) sources)
   endseq;
 
   Stmt main = seq
-    par
-      write(0,0,0,0,42);
-      write(1,1,0,0,41);
-      write(2,2,0,0,43);
-    endpar
+    //par
+    //  write(0,0,0,0,42);
+    //  write(1,1,0,0,41);
+    //  write(2,2,0,0,43);
+    //endpar
 
     par
       read(0,0,0,0);
@@ -262,7 +262,7 @@ module mkTestBCache#(Bit#(SourceW) source) (TestBCache);
       incrQ.enq(?);
       while (incrQ.canDeq) noAction;
       unlock;
-      //delay(100);
+      //delay(10);
     endseq
   endseq;
 

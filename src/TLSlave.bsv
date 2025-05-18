@@ -50,138 +50,22 @@ module mkTileLinkClientFSM#(
 
   Reg#(TLClientState) state <- mkReg(IDLE);
 
-  Reg#(ChannelA#(`TL_ARGS)) channelA <- mkReg(?);
-  Reg#(TLPerm) acquirePerm <- mkReg(?);
-
   sourceIdx numSource = fromInteger(valueOf(nSource));
 
+  let metaA <- mkMetaChannelA(master.channelA);
   let metaC <- mkMetaChannelC(master.channelC);
   let channelC = metaC.channel;
 
-  ProbeFSM#(addrW, nSource, `TL_ARGS) probeM <-
-    mkProbeFSM(logSize, master.channelB, metaC, sources);
+  let grantM <- mkGrantFSM(
+    sink, logSize,
+    metaA, master.channelB,
+    metaC, master.channelD,
+    master.channelE,
+    slave, repr, sources
+  );
 
-  Bit#(addrW) maxOffset = (1 << (logSize - logBusSize)) - 1;
-  RegFile#(Bit#(addrW), Bit#(dataW)) dataBuf <- mkRegFile(0, maxOffset);
-  RegFile#(Bit#(addrW), Bit#(1)) epochBuf <- mkRegFileInit(0, maxOffset, 1);
-  Reg#(Bit#(1)) epoch <- mkReg(1);
-
-  // Grant state
-  Reg#(Bit#(addrW)) grantSize <- mkReg(0);
-  Reg#(Bit#(addrW)) grantAddr <- mkReg(0);
-
-  Reg#(Bit#(addrW)) fillAddr <- mkReg(0);
-  Reg#(Bit#(addrW)) fillSize <- mkReg(0);
-
-  rule receiveChannelA if (state == IDLE);
-    let msg = master.channelA.first;
-    epoch <= epoch + 1;
-
-    master.channelA.deq;
-    channelA <= msg;
-
-    if (verbose)
-      $display("Client: ", fshow(msg));
-
-    grantAddr <= 0;
-    grantSize <= 1 << logSize;
-
-    fillAddr <= 0;
-    fillSize <= 1 << logSize;
-
-    doAssert(msg.size == logSize, "Invalid channel A request size");
-
-    Bit#(nSource) srcs = -1;
-    for (Integer i=0; i < valueOf(nSource); i = i + 1) begin
-      if (sources[i] == repr(msg.source)) srcs[i] = 0;
-    end
-
-    if (numSource > 1) begin
-      Cap cap = permChannelA(msg.opcode) == T ? N : B;
-      probeM.start(0, ProbeBlock(cap), align(msg.address), srcs);
-      state <= PROBE;
-    end else
-      state <= GRANT_BURST;
-  endrule
-
-  rule probeWrite if (waitAccessAck != maxBound || !metaC.first);
-    match {.index, .data, .last} <- probeM.write;
-
-    dataBuf.upd(index, data);
-    epochBuf.upd(index, epoch);
-    slave.channelA.enq(ChannelA{
-      address: channelA.address,
-      opcode: PutData,
-      data: data,
-      size: logSize,
-      source: sink,
-      mask: -1
-    });
-
-    if (metaC.first) waitAccessAck <= waitAccessAck + 1;
-  endrule
-
-  (* preempts = "probeWrite,rresponseMEM" *)
-  rule rresponseMEM
-    if (
-      fillSize > 0 &&
-      slave.channelD.first.source == sink &&
-      slave.channelD.first.opcode == AccessAckData
-    );
-
-    dataBuf.upd(fillAddr, slave.channelD.first.data);
-    epochBuf.upd(fillAddr, epoch);
-    slave.channelD.deq;
-
-    fillSize <= fillSize - fromInteger(valueOf(dataW)/8);
-    fillAddr <= fillAddr + 1;
-  endrule
-
-  // Ensure that we wait the previous write requests before reading the cache block
-  rule toGrant if (state == PROBE && (probeM.receiveData || waitAccessAck == 0));
-    state <= GRANT_BURST;
-    probeM.finish;
-
-    if (!probeM.receiveData)
-      slave.channelA.enq(ChannelA{
-        address: channelA.address,
-        opcode: GetFull,
-        size: logSize,
-        source: sink,
-        mask: ?,
-        data: ?
-      });
-  endrule
-
-  rule sendGrant if (state == GRANT_BURST &&& epochBuf.sub(grantAddr) == epoch);
-    let data = dataBuf.sub(grantAddr);
-    grantAddr <= grantAddr + 1;
-
-    Bool last = grantSize == fromInteger(valueOf(dataW)/8);
-
-    master.channelD.enq(ChannelD{
-      opcode: GrantData(probeM.exclusive ? T : B),
-      source: channelA.source,
-      size: channelA.size,
-      sink: sink,
-      data: data
-    });
-
-    if (last) begin
-      state <= GRANT_WAIT;
-    end
-
-    grantSize <= grantSize - fromInteger(valueOf(dataW)/8);
-  endrule
-
-  rule receiveGrantAck
-    if (state == GRANT_WAIT && master.channelE.first.sink == sink);
-
-    if (verbose)
-      $display("Client: ", fshow(master.channelE.first));
-
-    master.channelE.deq;
-    state <= IDLE;
+  rule startAcquire;
+    grantM.start;
   endrule
 
   // TODO: ensure that we receive GrantAck before release for a same address
@@ -406,7 +290,7 @@ module mkGrantFSM#(
     FifoI#(ChannelB#(`TL_ARGS)) channelB,
     MetaChannelC#(`TL_ARGS) metaC,
     FifoI#(ChannelD#(`TL_ARGS)) channelD,
-    FifoO#(ChannelD#(`TL_ARGS)) channelE,
+    FifoO#(ChannelE#(`TL_ARGS)) channelE,
     TLSlave#(addrW, dataW, sizeW, sinkW, 0) slave,
     function Bit#(sourceW) repr(Bit#(sourceW) source),
     Vector#(nSource, Bit#(sourceW)) sources
@@ -442,6 +326,8 @@ module mkGrantFSM#(
 
   Reg#(GrantState) state <- mkReg(Idle);
 
+  Reg#(Bool) waitAccessAck <- mkReg(False);
+
   rule probeWrite;
     match {.index, .data, .last} <- probeM.write;
 
@@ -455,6 +341,8 @@ module mkGrantFSM#(
       source: sink,
       mask: -1
     });
+
+    if (last) waitAccessAck <= True;
   endrule
 
   rule rresponseMEM
@@ -476,7 +364,7 @@ module mkGrantFSM#(
     state <= GrantBurst;
     probeM.finish;
 
-    if (!probeM.receiveData)
+    if (!probeM.receiveData) begin
       slave.channelA.enq(ChannelA{
         address: message.address,
         opcode: GetFull,
@@ -485,6 +373,7 @@ module mkGrantFSM#(
         mask: ?,
         data: ?
       });
+    end
   endrule
 
   rule sendGrant if (state == GrantBurst &&& epochBuf.sub(grantAddr) == epoch);
@@ -508,16 +397,25 @@ module mkGrantFSM#(
     grantSize <= grantSize - fromInteger(valueOf(dataW)/8);
   endrule
 
-  rule receiveGrantAck if (
+  rule receiveGrantAckData if (
       slave.channelD.first.source == sink &&
       slave.channelD.first.opcode == AccessAck &&
-      state == GrantWait && channelE.first.sink == sink
+      waitAccessAck
+    );
+
+    slave.channelD.deq;
+    waitAccessAck <= False;
+  endrule
+
+  rule receiveGrantAck if (
+      !waitAccessAck &&
+      state == GrantWait &&
+      channelE.first.sink == sink
     );
 
     if (verbose)
       $display("Client: ", fshow(channelE.first));
 
-    slave.channelD.deq;
     channelE.deq;
     state <= Idle;
   endrule

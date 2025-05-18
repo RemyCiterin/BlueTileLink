@@ -19,7 +19,7 @@
 //      v
 // Controller
 //
-// This module define the AcquireFSM, ReleaseFSM and ProbeFSM, it we want
+// This module define the AcquireMaster, ReleaseMaster and ProbeFSM, it we want
 // better performance, we must combine multiple of those module to improve
 // the performance by increasing the bandwidth
 import Connectable :: *;
@@ -32,16 +32,16 @@ import Utils :: *;
 import Fifo :: *;
 import Ehr :: *;
 
-export AcquireFSM(..);
-export ReleaseFSM(..);
-export mkAcquireFSM;
-export mkReleaseFSM;
+export AcquireMaster(..);
+export ReleaseMaster(..);
+export mkAcquireMaster;
+export mkReleaseMaster;
 
 `include "TL.defines"
 
 Bool verbose = False;
 
-interface AcquireFSM#(type indexT, `TL_ARGS_DECL);
+interface AcquireMaster#(type indexT, `TL_ARGS_DECL);
   method Action setSource(Bit#(sourceW) source);
 
   method Action acquireBlock(Grow grow, indexT idx, Bit#(addrW) addr);
@@ -68,12 +68,12 @@ logarithm of the size of the cache blocks it manage, a "block-ram" interface to
 manage to write the received data to, and a slave interface to interact with the
 coherence controller
 */
-module mkAcquireFSM#(
+module mkAcquireMaster#(
     Bit#(sizeW) logSize,
     TLSlave#(`TL_ARGS) slave,
     ArbiterClient_IFC arbiter,
     Bram#(Bit#(indexW), Bit#(dataW)) bram
-  ) (AcquireFSM#(Bit#(indexW), `TL_ARGS));
+  ) (AcquireMaster#(Bit#(indexW), `TL_ARGS));
 
   MetaChannelD#(`TL_ARGS) metaD <- mkMetaChannelD(slave.channelD);
   let channelD = metaD.channel;
@@ -348,7 +348,7 @@ module mkBurstFSM#(
   endmethod
 endmodule
 
-interface ReleaseFSM#(type indexT, `TL_ARGS_DECL);
+interface ReleaseMaster#(type indexT, `TL_ARGS_DECL);
   method Action setSource(Bit#(sourceW) source);
 
   method Bool canProbe;
@@ -388,12 +388,12 @@ typedef enum {
   RELEASE_BURST
 } ReleaseState deriving(Bits, FShow, Eq);
 
-module mkReleaseFSM#(
+module mkReleaseMaster#(
     Bit#(sizeW) logSize,
     TLSlave#(`TL_ARGS) slave,
     ArbiterClient_IFC arbiter,
     Bram#(Bit#(indexW), Bit#(dataW)) bram
-  ) (ReleaseFSM#(Bit#(indexW), `TL_ARGS));
+  ) (ReleaseMaster#(Bit#(indexW), `TL_ARGS));
 
   Reg#(ChannelB#(`TL_ARGS)) message <- mkReg(?);
   Reg#(Bool) needData <- mkReg(?);

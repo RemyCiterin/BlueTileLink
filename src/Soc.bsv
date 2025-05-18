@@ -7,8 +7,8 @@ import BuildVector :: *;
 import BCache :: *;
 import Utils :: *;
 
-import TLServer :: *;
-import TLClient :: *;
+import TLMaster :: *;
+import TLSlave :: *;
 import TLBram :: *;
 
 import TLTypes :: *;

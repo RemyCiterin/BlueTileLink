@@ -49,11 +49,12 @@ module mkMshr#(
     Bit#(sizeW) logSize,
     TLSlave#(`TL_ARGS) slave,
     ArbiterClient_IFC arbiter,
-    ReleaseFSM#(Bit#(indexW), `TL_ARGS) releaseM,
+    ReleaseMaster#(Bit#(indexW), `TL_ARGS) releaseM,
     Bram#(Bit#(indexW), Bit#(dataW)) bram
   ) (Mshr#(indexW, `TL_ARGS));
 
-  AcquireFSM#(Bit#(indexW), `TL_ARGS) acquireM <- mkAcquireFSM(logSize, slave, arbiter, bram);
+  AcquireMaster#(Bit#(indexW), `TL_ARGS) acquireM <-
+    mkAcquireMaster(logSize, slave, arbiter, bram);
 
   Reg#(Bit#(indexW)) index <- mkReg(?);
   Reg#(Transaction#(`TL_ARGS)) transaction <- mkReg(?);
@@ -155,7 +156,8 @@ module mkMshrFile#(
     interface channelE = toFifoI(fifoE);
   endinterface;
 
-  ReleaseFSM#(Bit#(indexW),`TL_ARGS) releaseM <- mkReleaseFSM(logSize, slave, readArbiter, bram);
+  ReleaseMaster#(Bit#(indexW),`TL_ARGS) releaseM <-
+    mkReleaseMaster(logSize, slave, readArbiter, bram);
 
   Vector#(mshr, Mshr#(indexW,`TL_ARGS)) mshrs <-
     replicateM(mkMshr(logSize, slave, writeArbiter, releaseM, bram));

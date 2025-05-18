@@ -147,10 +147,10 @@ module mkBCacheCore
   endinterface;
 
   let vbram0 <- mkBramFromBramBE(vbram[0]);
-  AcquireFSM#(Bit#(TAdd#(TLog#(numWay), TAdd#(offsetW, indexW))), `TL_ARGS) acquireM <-
-    mkAcquireFSM(logSize, slave, arbiter, vbram0);
-    ReleaseFSM#(Bit#(TAdd#(TLog#(numWay), TAdd#(offsetW, indexW))), `TL_ARGS) releaseM <-
-    mkReleaseFSM(logSize, slave, arbiter, vbram0);
+  AcquireMaster#(Bit#(TAdd#(TLog#(numWay), TAdd#(offsetW, indexW))), `TL_ARGS) acquireM <-
+    mkAcquireMaster(logSize, slave, arbiter, vbram0);
+  ReleaseMaster#(Bit#(TAdd#(TLog#(numWay), TAdd#(offsetW, indexW))), `TL_ARGS) releaseM <-
+    mkReleaseMaster(logSize, slave, arbiter, vbram0);
   let dataRam = vbram[1];
 
   Fifo#(2, Bool) successQ <- mkFifo;

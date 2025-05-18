@@ -78,7 +78,7 @@ endfunction
 // Return if an agent have a write permissions over a block, note that this function
 // for the `T` permission, the result is valid only if the node doesn't have branches
 function Bool hasWritePerm(TLPerm perm);
-  return perm > T;
+  return perm > B;
 endfunction
 
 

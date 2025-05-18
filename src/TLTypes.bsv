@@ -588,3 +588,10 @@ module mkMetaChannelD#(FifoO#(ChannelD#(`TL_ARGS)) master) (MetaChannelD#(`TL_AR
 
   method last = when(master.canDeq, isLast);
 endmodule
+
+// Used to represent range of sources/sinks, as example a cache or
+// a cache controller will be responsible of a given range with one
+// element per MSHR
+typedef Tuple2#(Bit#(idW),Bit#(idW)) Range#(numeric type idW);
+function Bool inRange(Bit#(idW) elem, Range#(idW) range) =
+  range.fst <= elem && elem <= range.snd;

@@ -5,7 +5,6 @@ import TLTypes :: *;
 import RegFile :: *;
 import Vector :: *;
 import Utils :: *;
-import AXI4 :: *;
 import Fifo :: *;
 import Ehr :: *;
 
@@ -14,20 +13,6 @@ import Ehr :: *;
 export mkTileLinkClientFSM;
 
 Bool verbose = False;
-
-typedef enum {
-  // Ready to receive a new acquire request
-  IDLE = 0,
-
-  // Send probe requests, and wait for response
-  PROBE = 1,
-
-  // Wait for a grant response
-  GRANT_WAIT = 2,
-
-  // Send a grant burst
-  GRANT_BURST = 3
-} TLClientState deriving(FShow, Eq, Bits);
 
 // A simple TileLink snoop controller
 module mkTileLinkClientFSM#(
@@ -39,38 +24,37 @@ module mkTileLinkClientFSM#(
     Vector#(nSource, Bit#(sourceW)) sources
   ) (Empty) provisos (Alias#(Bit#(TAdd#(1, TLog#(nSource))), sourceIdx));
 
-  //Reg#(Bool) waitAccessAck <- mkReg(False);
-  Reg#(Bit#(8)) waitAccessAck <- mkReg(0);
-
-  Bit#(sizeW) logBusSize = fromInteger(log2(valueOf(dataW)/8));
-
-  function Bit#(addrW) align(Bit#(addrW) address);
-    return address & ~((1 << logSize) - 1);
-  endfunction
-
-  Reg#(TLClientState) state <- mkReg(IDLE);
-
-  sourceIdx numSource = fromInteger(valueOf(nSource));
-
   let metaA <- mkMetaChannelA(master.channelA);
   let metaC <- mkMetaChannelC(master.channelC);
   let channelC = metaC.channel;
 
   let grantM <- mkGrantFSM(
-    sink, logSize,
+    sink+1, logSize,
     metaA, master.channelB,
     metaC, master.channelD,
     master.channelE,
     slave, repr, sources
   );
 
-  rule startAcquire;
+  function Bool conflict(Bit#(addrW) a1, Bit#(sizeW) s1, Bit#(addrW) a2, Bit#(sizeW) s2) =
+    (a2 & ~((1 << s1) - 1)) == (a1 & ~((1 << s2) - 1));
+
+  function Bool canRelease(ChannelC#(`TL_ARGS) msg);
+    if (grantM.active && grantM.grant) begin
+      match {.addr, .size} = grantM.access;
+      return !conflict(msg.address, msg.size, addr, size);
+    end else begin
+      return True;
+    end
+  endfunction
+
+  rule startAcquire if (metaA.first);
     grantM.start;
   endrule
 
-  // TODO: ensure that we receive GrantAck before release for a same address
   rule receiveRelease if (
-      metaC.channel.first.opcode matches tagged Release .*
+      canRelease(channelC.first) &&&
+      channelC.first.opcode matches tagged Release .*
     );
 
     channelC.deq;
@@ -87,17 +71,15 @@ module mkTileLinkClientFSM#(
     });
   endrule
 
-  // TODO: ensure that we receive GrantAck before release for a same address
   rule receiveReleaseData if (
-      channelC.first.opcode matches tagged ReleaseData .* &&&
-      (waitAccessAck != maxBound || !metaC.first)
+      canRelease(channelC.first) &&&
+      channelC.first.opcode matches tagged ReleaseData .*
     );
 
     channelC.deq;
     let msg = channelC.first;
     doAssert(msg.size == logSize, "Invalid channel C request size");
 
-    if (metaC.first) waitAccessAck <= waitAccessAck + 1;
     slave.channelA.enq(ChannelA{
       address: metaC.address,
       opcode: PutData,
@@ -120,12 +102,10 @@ module mkTileLinkClientFSM#(
 
   rule sendReleaseAck if (
       slave.channelD.first.source == sink &&
-      slave.channelD.first.opcode == AccessAck &&
-      waitAccessAck > 0
+      slave.channelD.first.opcode == AccessAck
     );
 
     slave.channelD.deq;
-    waitAccessAck <= waitAccessAck - 1;
   endrule
 endmodule
 

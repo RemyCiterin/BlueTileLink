@@ -1,5 +1,5 @@
 import BlockRam :: *;
-import TLServer :: *;
+import TLMaster :: *;
 import Arbiter :: *;
 import TLTypes :: *;
 import Vector :: *;

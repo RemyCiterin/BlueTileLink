@@ -6,9 +6,6 @@ import Vector :: *;
 import Array :: *;
 import Utils :: *;
 
-import AXI4_Lite :: *;
-import AXI4 :: *;
-
 import Ehr :: *;
 
 

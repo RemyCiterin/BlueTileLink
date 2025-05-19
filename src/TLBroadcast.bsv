@@ -8,61 +8,153 @@ import Utils :: *;
 import Fifo :: *;
 import Ehr :: *;
 
+import Arbiter :: *;
+
 `include "TL.defines"
 
-export mkTileLinkClientFSM;
+export TLBroadcastConf(..);
+export TLBroadcast(..);
+export mkTLBroadcast;
 
 Bool verbose = False;
 
+typedef struct {
+  Integer mshr;
+  Bit#(sinkW) sink;
+  Bit#(sizeW) logSize;
+  Vector#(nSource, Bit#(sourceW)) sources;
+  function Bit#(sourceW) fn(Bit#(sourceW) source) repr;
+} TLBroadcastConf#(numeric type nSource, `TL_ARGS_DECL);
+
+interface TLBroadcast#(`TL_ARGS_DECL);
+  interface TLSlave#(`TL_ARGS) coherent;
+  interface TLMaster#(addrW, dataW, sizeW, sinkW, 0) uncoherent;
+endinterface
+
 // A simple TileLink snoop controller
-module mkTileLinkClientFSM#(
-    Bit#(sinkW) sink,
-    Bit#(sizeW) logSize,
-    TLMaster#(`TL_ARGS) master,
-    TLSlave#(addrW, dataW, sizeW, sinkW, 0) slave,
-    function Bit#(sourceW) repr(Bit#(sourceW) source),
-    Vector#(nSource, Bit#(sourceW)) sources
-  ) (Empty) provisos (Alias#(Bit#(TAdd#(1, TLog#(nSource))), sourceIdx));
+module mkTLBroadcast#(
+    TLBroadcastConf#(nSource, `TL_ARGS) conf
+  ) (TLBroadcast#(`TL_ARGS)) provisos (Alias#(Bit#(TAdd#(1, TLog#(nSource))), sourceIdx));
+
+  Fifo#(2, ChannelA#(`TL_ARGS)) fifo1A <- mkFifo;
+  Fifo#(2, ChannelB#(`TL_ARGS)) fifo1B <- mkFifo;
+  Fifo#(2, ChannelC#(`TL_ARGS)) fifo1C <- mkFifo;
+  Fifo#(2, ChannelD#(`TL_ARGS)) fifo1D <- mkFifo;
+  Fifo#(2, ChannelE#(`TL_ARGS)) fifo1E <- mkFifo;
+
+  Fifo#(2, ChannelA#(addrW, dataW, sizeW, sinkW, 0)) fifo2A <- mkFifo;
+  Fifo#(2, ChannelD#(addrW, dataW, sizeW, sinkW, 0)) fifo2D <- mkFifo;
+
+  let master = interface TLMaster;
+    interface channelA = toFifoO(fifo1A);
+    interface channelB = toFifoI(fifo1B);
+    interface channelC = toFifoO(fifo1C);
+    interface channelD = toFifoI(fifo1D);
+    interface channelE = toFifoO(fifo1E);
+  endinterface;
+
+  let slave = interface TLSlave;
+    interface channelA = toFifoI(fifo2A);
+    interface channelB = nullFifoO;
+    interface channelC = nullFifoI;
+    interface channelD = toFifoO(fifo2D);
+    interface channelE = nullFifoI;
+  endinterface;
+
+  function Bool conflict(Bit#(addrW) a1, Bit#(sizeW) s1, Bit#(addrW) a2, Bit#(sizeW) s2) =
+    (a2 & ~((1 << s1) - 1)) == (a1 & ~((1 << s2) - 1));
 
   let metaA <- mkMetaChannelA(master.channelA);
   let metaC <- mkMetaChannelC(master.channelC);
   let channelC = metaC.channel;
 
-  let grantM <- mkGrantFSM(
-    sink+1, logSize,
-    metaA, master.channelB,
-    metaC, master.channelD,
-    master.channelE,
-    slave, repr, sources
-  );
+  AcquireSlave#(`TL_ARGS) acquireM[conf.mshr];
 
-  function Bool conflict(Bit#(addrW) a1, Bit#(sizeW) s1, Bit#(addrW) a2, Bit#(sizeW) s2) =
-    (a2 & ~((1 << s1) - 1)) == (a1 & ~((1 << s2) - 1));
+  for (Integer i=0; i < conf.mshr; i = i + 1) begin
+    acquireM[i] <- mkAcquireSlave(
+      conf.sink+1+fromInteger(i),
+      conf.logSize,
+      metaA,
+      master.channelB,
+      metaC,
+      master.channelD,
+      master.channelE,
+      slave,
+      conf.repr,
+      conf.sources
+    );
+  end
 
-  function Bool canRelease(ChannelC#(`TL_ARGS) msg);
-    if (grantM.active && grantM.grant) begin
-      match {.addr, .size} = grantM.access;
-      return !conflict(msg.address, msg.size, addr, size);
-    end else begin
-      return True;
-    end
-  endfunction
+  Bool canAcquire = True;
+  for (Integer i=0; i < conf.mshr; i = i + 1) begin
+    if (acquireM[i].active && acquireM[i].access.fst == metaA.address)
+      canAcquire = False;
+  end
 
-  rule startAcquire if (metaA.first);
-    grantM.start;
+  Integer next = 0;
+  for (Integer i=0; i < conf.mshr; i = i + 1) if (!acquireM[i].active) begin
+    next = i;
+  end
+
+  rule startAcquire if (canAcquire);
+    acquireM[next].start;
   endrule
 
-  rule receiveRelease if (
-      canRelease(channelC.first) &&&
-      channelC.first.opcode matches tagged Release .*
+  let releaseM <- mkReleaseSlave(
+    conf.sink,
+    conf.logSize,
+    metaC,
+    master.channelD,
+    slave
+  );
+
+  interface TLSlave coherent;
+    interface channelA = toFifoI(fifo1A);
+    interface channelB = toFifoO(fifo1B);
+    interface channelC = toFifoI(fifo1C);
+    interface channelD = toFifoO(fifo1D);
+    interface channelE = toFifoI(fifo1E);
+  endinterface
+
+  interface TLMaster uncoherent;
+    interface channelA = toFifoO(fifo2A);
+    interface channelB = nullFifoI;
+    interface channelC = nullFifoO;
+    interface channelD = toFifoI(fifo2D);
+    interface channelE = nullFifoO;
+  endinterface
+endmodule
+
+interface ReleaseSlave#(`TL_ARGS_DECL);
+  method Bool active;
+  method Tuple2#(Bit#(addrW),Bit#(sizeW)) access;
+endinterface
+
+module mkReleaseSlave#(
+    Bit#(sinkW) sink,
+    Bit#(sizeW) logSize,
+    MetaChannelC#(`TL_ARGS) metaC,
+    FifoI#(ChannelD#(`TL_ARGS)) channelD,
+    TLSlave#(addrW, dataW, sizeW, sinkW, 0) slave
+  ) (ReleaseSlave#(`TL_ARGS));
+
+  let channelC = metaC.channel;
+  let msg = channelC.first;
+
+  rule sendReleaseAck if (
+      slave.channelD.first.source == sink &&
+      slave.channelD.first.opcode == AccessAck
     );
 
-    channelC.deq;
-    let msg = channelC.first;
+    slave.channelD.deq;
+  endrule
 
+  rule receiveRelease if (msg.opcode matches tagged Release .*);
+
+    channelC.deq;
     doAssert(msg.size == logSize, "Invalid channel C request size");
 
-    master.channelD.enq(ChannelD{
+    channelD.enq(ChannelD{
       opcode: ReleaseAck,
       source: msg.source,
       size: msg.size,
@@ -71,14 +163,10 @@ module mkTileLinkClientFSM#(
     });
   endrule
 
-  rule receiveReleaseData if (
-      canRelease(channelC.first) &&&
-      channelC.first.opcode matches tagged ReleaseData .*
-    );
+  rule receiveReleaseData if (msg.opcode matches tagged ReleaseData .*);
 
-    channelC.deq;
-    let msg = channelC.first;
     doAssert(msg.size == logSize, "Invalid channel C request size");
+    channelC.deq;
 
     slave.channelA.enq(ChannelA{
       address: metaC.address,
@@ -90,7 +178,7 @@ module mkTileLinkClientFSM#(
     });
 
     if (metaC.last) begin
-      master.channelD.enq(ChannelD{
+      channelD.enq(ChannelD{
         opcode: ReleaseAck,
         source: msg.source,
         size: msg.size,
@@ -98,14 +186,6 @@ module mkTileLinkClientFSM#(
         data: ?
       });
     end
-  endrule
-
-  rule sendReleaseAck if (
-      slave.channelD.first.source == sink &&
-      slave.channelD.first.opcode == AccessAck
-    );
-
-    slave.channelD.deq;
   endrule
 endmodule
 
@@ -129,6 +209,7 @@ interface ProbeFSM#(numeric type indexW, numeric type nSource, `TL_ARGS_DECL);
 endinterface
 
 module mkProbeFSM#(
+    Bit#(sinkW) sink,
     Bit#(sizeW) logSize,
     FifoI#(ChannelB#(`TL_ARGS)) channelB,
     MetaChannelC#(`TL_ARGS) metaC,
@@ -165,14 +246,15 @@ module mkProbeFSM#(
   endfunction
 
   rule receiveProbeAck
-    if (message.opcode matches tagged ProbeAck .reduce &&& message.address == address);
+    if (message.opcode matches tagged ProbeAck .reduce &&& message.address == address && busy);
 
     let idx = findSource(message.source);
-    doAssert(toReceive[idx] == 1, "Receive two ProbeAck from the same source");
     toReceive[idx] <= 0;
 
     if (verbose)
       $display("Client: ", fshow(message));
+
+    doAssert(toReceive[idx] == 1, "Receive two ProbeAck from the same source");
 
     if (reduceTo(reduce) != N) exc <= False;
 
@@ -194,15 +276,16 @@ module mkProbeFSM#(
   endrule
 
   method ActionValue#(Tuple3#(Bit#(indexW), Bit#(dataW), Bool)) write
-    if (message.opcode matches tagged ProbeAckData .reduce &&& message.address == address);
+    if (message.opcode matches tagged ProbeAckData .reduce &&& message.address == address && busy);
 
     let idx = findSource(message.source);
-    doAssert(toReceive[idx] == 1, "Receive two ProbeAckData from the same source");
-    doAssert(!hasData, "Receive a cache block from a Probe request multiple times");
     channelC.deq;
 
     if (verbose)
       $display("Client: ", fshow(message));
+
+    doAssert(toReceive[idx] == 1, "Receive two ProbeAckData from the same source");
+    doAssert(!hasData, "Receive a cache block from a Probe request multiple times");
 
     index <= index + 1;
 
@@ -239,7 +322,7 @@ module mkProbeFSM#(
   method Bool receiveData = hasData;
 endmodule
 
-interface GrantFSM#(`TL_ARGS_DECL);
+interface AcquireSlave#(`TL_ARGS_DECL);
   // Start to answer to a channel A request, the user must ensure that
   // no other transaction (Acquire, Release...) is using the same address
   method Action start;
@@ -263,7 +346,7 @@ typedef enum {
   GrantBurst
 } GrantState deriving(Bits, FShow, Eq);
 
-module mkGrantFSM#(
+module mkAcquireSlave#(
     Bit#(sinkW) sink,
     Bit#(sizeW) logSize,
     MetaChannelA#(`TL_ARGS) metaA,
@@ -274,7 +357,7 @@ module mkGrantFSM#(
     TLSlave#(addrW, dataW, sizeW, sinkW, 0) slave,
     function Bit#(sourceW) repr(Bit#(sourceW) source),
     Vector#(nSource, Bit#(sourceW)) sources
-  ) (GrantFSM#(`TL_ARGS)) provisos (Alias#(Bit#(TAdd#(1, TLog#(nSource))), sourceIdx));
+  ) (AcquireSlave#(`TL_ARGS)) provisos (Alias#(Bit#(TAdd#(1, TLog#(nSource))), sourceIdx));
 
   let channelA = metaA.channel;
   let channelC = metaC.channel;
@@ -289,7 +372,7 @@ module mkGrantFSM#(
   endfunction
 
   ProbeFSM#(addrW, nSource, `TL_ARGS) probeM <-
-    mkProbeFSM(logSize, channelB, metaC, sources);
+    mkProbeFSM(sink, logSize, channelB, metaC, sources);
 
   Bit#(addrW) maxOffset = (1 << (logSize - logBusSize)) - 1;
   RegFile#(Bit#(addrW), Bit#(dataW)) dataBuf <- mkRegFile(0, maxOffset);
@@ -428,8 +511,17 @@ module mkGrantFSM#(
       Cap cap = permChannelA(msg.opcode) == T ? N : B;
       probeM.start(0, ProbeBlock(cap), align(msg.address), srcs);
       state <= Probe;
-    end else
+    end else begin
       state <= GrantBurst;
+      slave.channelA.enq(ChannelA{
+        address: message.address,
+        opcode: GetFull,
+        size: logSize,
+        source: sink,
+        mask: ?,
+        data: ?
+      });
+    end
   endmethod
 
   method active = state != Idle;

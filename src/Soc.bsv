@@ -8,7 +8,7 @@ import BCache :: *;
 import Utils :: *;
 
 import TLMaster :: *;
-import TLSlave :: *;
+import TLBroadcast :: *;
 import TLBram :: *;
 
 import TLTypes :: *;
@@ -363,13 +363,17 @@ module mkCPU_SIM(Empty);
     return source >= fromInteger(nCache) ? fromInteger(nCache) : source;
   endfunction
 
-  let rom_controller <- mkTLBram(rom);
-  mkTileLinkClientFSM(
-    0,
-    logSize,
-    master,
-    rom_controller,
-    repr,
-    append(vec(fromInteger(nCache)),bsources)
+  TLSlave#(AddrW, DataW, SizeW, SinkW, 0) rom_controller <- mkTLBram(rom);
+  TLBroadcast#(AddrW, DataW, SizeW, SourceW, SinkW) broadcast <- mkTLBroadcast(
+    TLBroadcastConf{
+      mshr: 4,
+      sink: 0,
+      repr: repr,
+      logSize: logSize,
+      sources: append(vec(fromInteger(nCache)),bsources)
+    }
   );
+
+  mkConnection(master, broadcast.coherent);
+  mkConnection(rom_controller, broadcast.uncoherent);
 endmodule

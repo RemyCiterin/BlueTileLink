@@ -4,7 +4,7 @@ import BypassReg :: *;
 import BRAMCore :: *;
 import Vector :: *;
 import Array :: *;
-import Utils :: *;
+import TLUtils :: *;
 
 import Ehr :: *;
 

@@ -5,7 +5,7 @@ import StmtFSM :: *;
 import Vector :: *;
 import BuildVector :: *;
 import BCache :: *;
-import Utils :: *;
+import TLUtils :: *;
 
 import TLMaster :: *;
 import TLBroadcast :: *;

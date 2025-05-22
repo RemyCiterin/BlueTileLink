@@ -1,6 +1,6 @@
 import Connectable :: *;
 import Vector :: *;
-import Utils :: *;
+import TLUtils :: *;
 import Fifo :: *;
 
 `include "TL.defines"

@@ -3,7 +3,7 @@ import TLMaster :: *;
 import TLTypes :: *;
 import Arbiter :: *;
 import Vector :: *;
-import Utils :: *;
+import TLUtils :: *;
 import MSHR :: *;
 import Fifo :: *;
 import PLRU :: *;

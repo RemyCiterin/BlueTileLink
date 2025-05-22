@@ -4,7 +4,7 @@ import BlockRam :: *;
 import TLTypes :: *;
 import RegFile :: *;
 import Vector :: *;
-import Utils :: *;
+import TLUtils :: *;
 import Fifo :: *;
 import Ehr :: *;
 

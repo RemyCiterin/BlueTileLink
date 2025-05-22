@@ -28,7 +28,7 @@ import TLTypes :: *;
 import Arbiter :: *;
 import RegFile :: *;
 import Vector :: *;
-import Utils :: *;
+import TLUtils :: *;
 import Fifo :: *;
 import Ehr :: *;
 

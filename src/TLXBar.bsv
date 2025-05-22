@@ -3,7 +3,7 @@ import TLTypes :: *;
 import RegFile :: *;
 import Vector :: *;
 import Array :: *;
-import Utils :: *;
+import TLUtils :: *;
 import Fifo :: *;
 import Ehr :: *;
 
@@ -14,7 +14,6 @@ export mkDecreaseWidth;
 export XBarConf(..);
 export XBar(..);
 export mkXBar;
-
 
 // This package defines N*M cross bar interconnects, to root the TileLink packets, it use
 // - The address in channels A and C

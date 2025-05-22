@@ -3,12 +3,16 @@ import TLMaster :: *;
 import Arbiter :: *;
 import TLTypes :: *;
 import Vector :: *;
-import Utils :: *;
+import TLUtils :: *;
 import Fifo :: *;
 import Ehr :: *;
 
 import RegFile :: *;
 import RegFileUtils :: *;
+
+export Transaction(..);
+export MshrFile(..);
+export mkMshrFile;
 
 `include "TL.defines"
 

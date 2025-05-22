@@ -12,6 +12,7 @@ export mkTLBram;
 typedef enum {Idle, Write, Read} TLBramState deriving(Bits, FShow, Eq);
 
 module mkTLBram#(
+    Bit#(addrW) offset,
     BramBE#(Bit#(addrW), dataW) bram
   ) (TLSlave#(`TL_ARGS));
 
@@ -41,7 +42,7 @@ module mkTLBram#(
   Ehr#(2, TLBramState) state <- mkEhr(Idle);
 
   rule readBram if (state[1] == Read);
-    bram.read(addrReg[1] >> logBusSize);
+    bram.read((addrReg[1] - offset) >> logBusSize);
   endrule
 
   rule startGetFull if (message.opcode == GetFull && state[0] == Idle);
@@ -77,7 +78,7 @@ module mkTLBram#(
   rule receivePutData
     if (message.opcode == PutData && state[0] != Read);
 
-    bram.write(metaA.address >> logBusSize, message.data, message.mask);
+    bram.write((metaA.address - offset) >> logBusSize, message.data, message.mask);
     metaA.channel.deq;
 
     state[0] <= metaA.last ? Idle : Write;

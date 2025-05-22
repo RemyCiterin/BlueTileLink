@@ -363,7 +363,7 @@ module mkCPU_SIM(Empty);
     return source >= fromInteger(nCache) ? fromInteger(nCache) : source;
   endfunction
 
-  TLSlave#(AddrW, DataW, SizeW, SinkW, 0) rom_controller <- mkTLBram(rom);
+  TLSlave#(AddrW, DataW, SizeW, SinkW, 0) rom_controller <- mkTLBram(0,rom);
   TLBroadcast#(AddrW, DataW, SizeW, SourceW, SinkW) broadcast <- mkTLBroadcast(
     TLBroadcastConf{
       mshr: 4,

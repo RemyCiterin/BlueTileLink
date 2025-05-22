@@ -5,6 +5,7 @@ import BRAMCore :: *;
 import Vector :: *;
 import Array :: *;
 import TLUtils :: *;
+import RegFile :: *;
 
 import Ehr :: *;
 
@@ -17,6 +18,57 @@ interface Bram#(type addrT, type dataT);
   method Bool canDeq;
   method Action deq;
 endinterface
+
+module wrapBramRegFile#(RegFile#(addrT, dataT) rf) (Bram#(addrT,dataT))
+  provisos (Bits#(addrT, addrWidth), Bits#(dataT, dataWidth), Eq#(addrT));
+  FIFOF#(Maybe#(dataT)) rsp <- mkPipelineFIFOF;
+
+  Reg#(dataT) dout <- mkReg(?);
+
+  RWire#(dataT) currentWrData <- mkRWire;
+  RWire#(addrT) currentWrAddr <- mkRWire;
+  let wrAddr = fromMaybe(?, currentWrAddr.wget);
+  let wrData = fromMaybe(?, currentWrData.wget);
+  let wrValid = isJust(currentWrAddr.wget);
+
+  RWire#(addrT) currentRdAddr <- mkRWire;
+  let rdAddr = fromMaybe(?, currentRdAddr.wget);
+  let rdValid = isJust(currentRdAddr.wget);
+
+  (* no_implicit_conditions, fire_when_enabled *)
+  rule block_ram_apply_write if (wrValid);
+    rf.upd(wrAddr, wrData);
+  endrule
+
+  (* fire_when_enabled *)
+  rule block_ram_apply_read if (rdValid && rsp.notFull());
+    let data = (wrValid && wrAddr == rdAddr ? Valid(wrData) : Invalid);
+    dout <= rf.sub(rdAddr);
+    rsp.enq(data);
+  endrule
+
+  method Action write(addrT addr, dataT data);
+    currentWrAddr.wset(addr);
+    currentWrData.wset(data);
+  endmethod
+
+  method Action read(addrT addr) if (rsp.notFull());
+    currentRdAddr.wset(addr);
+  endmethod
+
+  method Bool canRead = rsp.notFull;
+
+  method dataT response if (rsp.notEmpty);
+    case (rsp.first) matches
+      tagged Valid .data : return data;
+      tagged Invalid: return dout;
+    endcase
+  endmethod
+
+  method canDeq = rsp.notEmpty;
+
+  method deq = rsp.deq;
+endmodule
 
 module wrapBram
   #(BRAM_DUAL_PORT#(addrT,dataT) bram) (Bram#(addrT, dataT))
@@ -151,6 +203,72 @@ interface BramVec#(type addrT, numeric type n, type dataT);
   method Bool canDeq;
   method Action deq;
 endinterface
+
+module wrapBramVecRegFile#(Vector#(n, RegFile#(addrT,dataT)) rf) (BramVec#(addrT, n, dataT))
+  provisos (Bits#(addrT, addrWidth), Eq#(addrT), Bits#(dataT, dataW));
+
+  FIFOF#(Tuple2#(Vector#(n, dataT), Bit#(n))) rsp <- mkPipelineFIFOF;
+
+  Vector#(n, Reg#(dataT)) dout <- replicateM(mkReg(?));
+
+  // currentData and currentAddr contain the arguments of the last write
+  RWire#(addrT) currentWrAddr <- mkRWire;
+  RWire#(Bit#(n)) currentWrMask <- mkRWire;
+  RWire#(Vector#(n, dataT)) currentWrData <- mkRWire;
+  let wrAddr = fromMaybe(?, currentWrAddr.wget);
+  let wrData = fromMaybe(?, currentWrData.wget);
+  let wrMask = fromMaybe(?, currentWrMask.wget);
+  let wrValid = isJust(currentWrAddr.wget);
+
+  RWire#(addrT) currentRdAddr <- mkRWire;
+  let rdAddr = fromMaybe(?, currentRdAddr.wget);
+  let rdValid = isJust(currentRdAddr.wget);
+
+  (* no_implicit_conditions, fire_when_enabled *)
+  rule block_ram_apply_write if (wrValid);
+    for (Integer i=0; i < valueOf(n); i = i + 1) if (wrMask[i] == 1) begin
+      rf[i].upd(wrAddr, wrData[i]);
+    end
+  endrule
+
+  (* fire_when_enabled *)
+  rule block_ram_apply_read if (rdValid && rsp.notFull());
+    let data = tuple2(wrData, wrValid && wrAddr == rdAddr ? wrMask : 0);
+
+    for (Integer i=0; i < valueOf(n); i = i + 1) begin
+      dout[i] <= rf[i].sub(rdAddr);
+    end
+
+    rsp.enq(data);
+  endrule
+
+  method Action write(addrT addr, Vector#(n, dataT) data, Bit#(n) mask);
+    currentWrAddr.wset(addr);
+    currentWrData.wset(data);
+    currentWrMask.wset(mask);
+  endmethod
+
+  method Action read(addrT addr) if (rsp.notFull());
+    currentRdAddr.wset(addr);
+  endmethod
+
+  method Bool canRead = rsp.notFull;
+
+  method Vector#(n, dataT) response if (rsp.notEmpty);
+    match {.data, .mask} = rsp.first;
+    Vector#(n, dataT) ret = data;
+
+    for (Integer i=0; i < valueOf(n); i = i + 1) begin
+      if (mask[i] == 0) ret[i] = dout[i];
+    end
+
+    return ret;
+  endmethod
+
+  method canDeq = rsp.notEmpty;
+
+  method deq = rsp.deq;
+endmodule
 
 module mkSizedBramVec#(Integer size) (BramVec#(addrT, n, dataT))
   provisos (Bits#(addrT, addrWidth), Eq#(addrT), Bits#(dataT, dataW));

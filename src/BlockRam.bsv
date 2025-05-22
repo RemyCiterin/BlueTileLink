@@ -18,13 +18,12 @@ interface Bram#(type addrT, type dataT);
   method Action deq;
 endinterface
 
-module mkSizedBram#(Integer size) (Bram#(addrT, dataT))
+module wrapBram
+  #(BRAM_DUAL_PORT#(addrT,dataT) bram) (Bram#(addrT, dataT))
   provisos (Bits#(addrT, addrWidth), Bits#(dataT, dataWidth), Eq#(addrT));
-  BRAM_DUAL_PORT#(addrT, dataT) bram <- mkBRAMCore2(size, False);
+  FIFOF#(Maybe#(dataT)) rsp <- mkPipelineFIFOF;
   let wrPort = bram.a;
   let rdPort = bram.b;
-
-  FIFOF#(Maybe#(dataT)) rsp <- mkPipelineFIFOF;
 
   // currentData and currentAddr contain the arguments of the last write
   RWire#(dataT) currentWrData <- mkRWire;
@@ -70,6 +69,20 @@ module mkSizedBram#(Integer size) (Bram#(addrT, dataT))
   method canDeq = rsp.notEmpty;
 
   method deq = rsp.deq;
+endmodule
+
+module mkSizedBram#(Integer size) (Bram#(addrT, dataT))
+  provisos (Bits#(addrT, addrWidth), Bits#(dataT, dataWidth), Eq#(addrT));
+  BRAM_DUAL_PORT#(addrT, dataT) bram <- mkBRAMCore2(size, False);
+  let ifc <- wrapBram(bram);
+  return ifc;
+endmodule
+
+module mkSizedBramLoad#(Integer size, String file, Bool binary) (Bram#(addrT, dataT))
+  provisos (Bits#(addrT, addrWidth), Bits#(dataT, dataWidth), Eq#(addrT));
+  BRAM_DUAL_PORT#(addrT, dataT) bram <- mkBRAMCore2Load(size, False, file, binary);
+  let ifc <- wrapBram(bram);
+  return ifc;
 endmodule
 
 // return an initialized block of ram
@@ -276,6 +289,66 @@ interface BramBE#(type addrT, numeric type dataW);
   method Bool canDeq;
   method Action deq;
 endinterface
+
+module wrapBramBE#(BRAM_DUAL_PORT_BE#(addrT,Bit#(dataW),TDiv#(dataW,8)) bram)
+  (BramBE#(addrT, dataW)) provisos (Bits#(addrT, addrWidth), Eq#(addrT));
+
+  FIFOF#(Tuple2#(Bit#(dataW), Bit#(TDiv#(dataW,8)))) rsp <- mkPipelineFIFOF;
+
+  RWire#(addrT) currentWrAddr <- mkRWire;
+  RWire#(Bit#(dataW)) currentWrData <- mkRWire;
+  RWire#(Bit#(TDiv#(dataW,8))) currentWrMask <- mkRWire;
+  let wrAddr = fromMaybe(?, currentWrAddr.wget);
+  let wrData = fromMaybe(?, currentWrData.wget);
+  let wrMask = fromMaybe(?, currentWrMask.wget);
+  let wrValid = isJust(currentWrAddr.wget);
+
+  RWire#(addrT) currentRdAddr <- mkRWire;
+  let rdAddr = fromMaybe(?, currentRdAddr.wget);
+  let rdValid = isJust(currentRdAddr.wget);
+
+  (* no_implicit_conditions, fire_when_enabled *)
+  rule block_ram_apply_write if (wrValid);
+    bram.a.put(wrMask, wrAddr, wrData);
+  endrule
+
+  (* fire_when_enabled *)
+  rule block_ram_apply_read if (rdValid && rsp.notFull());
+    let data = tuple2(wrData, wrValid && wrAddr == rdAddr ? wrMask : 0);
+    bram.b.put(0, rdAddr, ?);
+    rsp.enq(data);
+  endrule
+
+  method Action write(addrT addr, Bit#(dataW) data, Bit#(TDiv#(dataW,8)) mask);
+    currentWrAddr.wset(addr);
+    currentWrData.wset(data);
+    currentWrMask.wset(mask);
+  endmethod
+
+  method Action read(addrT addr) if (rsp.notFull());
+    currentRdAddr.wset(addr);
+  endmethod
+
+  method Bool canRead = rsp.notFull;
+
+  method Bit#(dataW) response if (rsp.notEmpty);
+    Bit#(8) ret[valueOf(TDiv#(dataW,8))];
+    match {.data, .mask} = rsp.first;
+
+    for (Integer i=0; i < arrayLength(ret); i = i + 1) begin
+      Bit#(8) rhs = bram.b.read[8*i+7:8*i];
+      Bit#(8) lhs = data[8*i+7:8*i];
+
+      ret[i] = mask[i] == 1 ? lhs : rhs;
+    end
+
+    return packArray(ret);
+  endmethod
+
+  method canDeq = rsp.notEmpty;
+
+  method deq = rsp.deq;
+endmodule
 
 module mkSizedBramBE#(Integer size) (BramBE#(addrT, dataW))
   provisos (Bits#(addrT, addrSz), Eq#(addrT));

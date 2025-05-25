@@ -238,16 +238,111 @@ module mkPipelineFifo(Fifo#(n, t)) provisos(Bits#(t, size_t));
   return fifo;
 endmodule
 
-// A fifo of size two without combinatorial path between both sides
-module mkFifo(Fifo#(n, t)) provisos(Bits#(t, size_t));
-  FIFOF#(t) fifo <- mkSizedFIFOF(valueOf(n));
+module mkSizeOneFifo(Fifo#(n, t)) provisos(Bits#(t, size_t));
+  Reg#(Bool) valid <- mkReg(False);
 
+  Reg#(t) elem <- mkReg(?);
+
+  Wire#(t) enqVal <- mkDWire(?);
+  Wire#(Bool) doEnq <- mkDWire(False);
+  Wire#(Bool) doDeq <- mkDWire(False);
+
+  (* no_implicit_conditions, fire_when_enabled *)
+  rule ehr_canon;
+    valid <= doEnq || (valid && !doDeq);
+    elem <= doEnq ? enqVal : elem;
+  endrule
+
+  method Bool canDeq = valid;
+  method t first if (valid) = elem;
+  method Action deq if (valid);
+    doDeq <= True;
+  endmethod
+
+  method canEnq = !valid;
+  method Action enq(t x) if (!valid);
+    doEnq <= True;
+    enqVal <= x;
+  endmethod
+endmodule
+
+module mkSizeTwoFifo(Fifo#(n, t)) provisos(Bits#(t, size_t));
+  Reg#(Bool) valid0 <- mkReg(False);
+  Reg#(Bool) valid1 <- mkReg(False);
+
+  Reg#(t) elem0 <- mkReg(?);
+  Reg#(t) elem1 <- mkReg(?);
+
+  Wire#(t) enqVal <- mkDWire(?);
+  Wire#(Bool) doEnq <- mkDWire(False);
+  Wire#(Bool) doDeq <- mkDWire(False);
+
+  (* no_implicit_conditions, fire_when_enabled *)
+  rule ehr_canon;
+    if (!valid0 || doDeq) begin
+      // Forward value to position zero
+      elem0 <= valid1 ? elem1 : enqVal;
+      valid0 <= valid1 || doEnq;
+
+      valid1 <= valid1 && doEnq;
+      elem1 <= enqVal;
+    end else begin
+      elem1 <= doEnq ? enqVal : elem1;
+      valid1 <= doEnq || valid1;
+    end
+  endrule
+
+  method Bool canDeq = valid0;
+  method t first if (valid0) = elem0;
+  method Action deq if (valid0);
+    doDeq <= True;
+  endmethod
+
+  method canEnq = !valid1 || !valid0;
+  method Action enq(t x) if (!valid1 || !valid0);
+    doEnq <= True;
+    enqVal <= x;
+  endmethod
+endmodule
+
+// WARNING: wrap canDeq to notEmpty, not true in the general case
+module wrapFIFOF#(FIFOF#(t) fifo) (Fifo#(n,t));
   method deq = fifo.deq;
   method first = fifo.first;
   method canDeq = fifo.notEmpty;
 
   method enq = fifo.enq;
   method canEnq = fifo.notFull;
+endmodule
+
+// A fifo of size two without combinatorial path between both sides
+module mkFifo(Fifo#(n, t)) provisos(Bits#(t, size_t));
+  Fifo#(n,t) ifc = ?;
+
+  case (valueOf(n))
+    1 : ifc <- mkSizeOneFifo;
+    2 : ifc <- mkSizeTwoFifo;
+    default : begin
+      Fifo#(TSub#(n,1),t) fifo1 <- mkBypassFifo;
+      Fifo#(1,t) fifo2 <- mkPipelineFifo;
+
+      rule connect_fifo;
+        fifo2.enq(fifo1.first);
+        fifo1.deq;
+      endrule
+
+      ifc = interface Fifo;
+        method canEnq = fifo1.canEnq;
+        method enq = fifo1.enq;
+
+        method canDeq = fifo2.canDeq;
+        method first = fifo2.first;
+        method deq = fifo2.deq;
+      endinterface;
+    end
+  endcase
+
+  return ifc;
 endmodule
 
 module mkBypassFifo(Fifo#(n, t)) provisos(Bits#(t, size_t));

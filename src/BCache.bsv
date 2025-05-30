@@ -329,7 +329,7 @@ module mkBCacheCore
       if (hit) numHit <= numHit + 1;
       else numMis <= numMis + 1;
 
-      $display("source: %d hit: %d mis: %d", source, numHit, numMis);
+      //$display("source: %d hit: %d mis: %d", source, numHit, numMis);
 
       if (isStoreConditional(op))
         successQ.enq(hit && reserved);
@@ -367,13 +367,14 @@ module mkBCacheCore
 
         case (permRam[way].response) matches
           D: state[0] <= Release;
-          default: begin
-            state[0] <= AcqRel;
-            acquireM.acquireBlock(
-              needPermT(op) ? (perm == N ? NtoT : BtoT) : NtoB,
-              {way, index,0}, address
-            );
-          end
+          default: state[0] <= Release;
+          //default: begin
+          //  state[0] <= AcqRel;
+          //  acquireM.acquireBlock(
+          //    needPermT(op) ? (perm == N ? NtoT : BtoT) : NtoB,
+          //    {way, index,0}, address
+          //  );
+          //end
         endcase
 
         doMiss(way, t, op, needPermT(op) ? T : B);

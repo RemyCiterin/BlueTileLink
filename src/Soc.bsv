@@ -240,8 +240,8 @@ module mkTestBCache#(Bit#(SourceW) source) (TestBCache);
   endseq;
 
   Stmt increment = seq
-    cache.lookup(2,0);
-    cache.matching(1, Load);
+    cache.lookup(0,0);
+    cache.matching(5, Load);
     read;
 
     cache.lookup(1,0);
@@ -363,7 +363,7 @@ module mkCPU_SIM(Empty);
     return source >= fromInteger(nCache) ? fromInteger(nCache) : source;
   endfunction
 
-  TLSlave#(AddrW, DataW, SizeW, SinkW, 0) rom_controller <- mkTLBram(0,rom);
+  TLSlave#(AddrW, DataW, SizeW, SinkW, 0) rom_controller <- mkTLBram(0,4096,rom);
   TLBroadcast#(AddrW, DataW, SizeW, SourceW, SinkW) broadcast <- mkTLBroadcast(
     TLBroadcastConf{
       mshr: 4,

@@ -22,42 +22,55 @@ typedef union tagged {
     Bit#(TDiv#(dataW,8)) mask;
   } Store;
 
-  // Load
+  // Aligned Load
   void Load;
 
   // LR/SC sequence
+  void LoadReserve;
   struct {
     Bit#(dataW) data;
     Bit#(TDiv#(dataW,8)) mask;
   } StoreConditional;
 
-  void LoadReserve;
-
-  // Stop the transaction, as example due to a MMU mis or fault between stage 1 and 2
-  void Stop;
-} CacheOp#(numeric type dataW) deriving(Bits, FShow, Eq);
+  // Atomic operations
+  atomicOp Atomic;
+} CacheOp#(type atomicOp, numeric type dataW) deriving(Bits, FShow);
 
 // Return if an operation need the T (Read+Write) permission to be performed
 // LoadReserve need this permission, overwise the next StoreConditional will
 // always fail
-function Bool needPermT(CacheOp#(dataW) op);
+function Bool needPermT(CacheOp#(atomicOp, dataW) op);
   return case (op) matches
     tagged StoreConditional .* : True;
+    tagged Atomic .* : True;
     tagged Store .* : True;
     LoadReserve : True;
     default : False;
   endcase;
 endfunction
 
-function Bool isStoreConditional(CacheOp#(dataW) op);
+function Bool isStoreConditional(CacheOp#(atomicOp, dataW) op);
   if (op matches tagged StoreConditional .*) return True;
   else return False;
 endfunction
 
-interface BCacheCore#(numeric type numWay, type tagT, type indexT, type offsetT, `TL_ARGS_DECL);
+function Bool isLoadReserve(CacheOp#(atomicOp, dataW) op);
+  if (op matches LoadReserve) return True;
+  else return False;
+endfunction
+
+function Bool isLoad(CacheOp#(atomicOp, dataW) op);
+  if (op matches Load) return True;
+  else return False;
+endfunction
+
+interface BCacheCore
+  #(type atomicOp, numeric type numWay, type tagT, type indexT, type offsetT, `TL_ARGS_DECL);
   method Action lookup(indexT index, offsetT offset);
-  method Action matching(tagT tag, CacheOp#(dataW) op);
-  method ActionValue#(Bit#(dataW)) response;
+  method Action matching(tagT tag, CacheOp#(atomicOp, dataW) op);
+  method Action abort;
+  method ActionValue#(Bit#(dataW)) loadResponse;
+  method ActionValue#(Bit#(dataW)) atomicResponse;
   method ActionValue#(Bool) success;
 
   /*** Inform the host CPU that we evict a cache block ***/
@@ -70,9 +83,9 @@ typedef struct {
   TLPerm perm;
   Bit#(tagW) tag;
   Token#(numWay) way;
-  CacheOp#(dataW) op;
-} BCacheInfo#(numeric type numWay, numeric type tagW, numeric type dataW)
-deriving(FShow, Eq, Bits);
+  CacheOp#(atomicOp, dataW) op;
+} BCacheInfo#(type atomicOp, numeric type numWay, numeric type tagW, numeric type dataW)
+deriving(FShow, Bits);
 
 typedef struct {
   Bit#(tagW) tag;
@@ -91,10 +104,6 @@ typedef enum {
   Acquire,
   // Release (then acquire) a cache line
   Release,
-  // Release permission and acquire cache block
-  AcqRel,
-  // Release without acquire
-  ReleaseNoAcq,
   // Invalidations requests from the cache controller
   ProbeMatching,
   // Wait for the probe to acknoledge
@@ -103,14 +112,20 @@ typedef enum {
 
 // Invariant: the offset must correspond to the position of a beat in a cache block,
 // this configuration can be used to implement banked ram, like even/odd indexes...
+// It also contains the necessary function to execute an atomic operation
 typedef struct {
   function Bit#(addrW) encode(Bit#(tagW) tag, Bit#(indexW) index, Bit#(offsetW) offset) encode;
   function Tuple3#(Bit#(tagW),Bit#(indexW),Bit#(offsetW)) decode(Bit#(addrW) tag) decode;
-} BCacheConf#(numeric type tagW, numeric type indexW, numeric type offsetW, `TL_ARGS_DECL);
+  function Bit#(dataW) atomic(atomicOp atomic, Bit#(dataW) value) atomic;
+} BCacheConf
+#(type atomicOp, numeric type tagW, numeric type indexW, numeric type offsetW, `TL_ARGS_DECL);
 
 module mkBCacheCore
-  #(BCacheConf#(tagW,indexW,offsetW,`TL_ARGS) conf, TLSlave#(`TL_ARGS) slave)
-  (BCacheCore#(numWay, Bit#(tagW), Bit#(indexW), Bit#(offsetW), `TL_ARGS));
+  #(BCacheConf#(atomicOp, tagW,indexW,offsetW,`TL_ARGS) conf, TLSlave#(`TL_ARGS) slave)
+  (BCacheCore#(atomicOp, numWay, Bit#(tagW), Bit#(indexW), Bit#(offsetW), `TL_ARGS))
+  provisos(Bits#(atomicOp, atomicOpW));
+
+  Reg#(Bool) started <- mkReg(False);
 
   Vector#(numWay, Bram#(Bit#(indexW), TLPerm)) permRam <- replicateM(mkBramInit(N));
   Vector#(numWay, Bram#(Bit#(indexW), Bit#(tagW))) tagRam <- replicateM(mkBram());
@@ -146,6 +161,7 @@ module mkBCacheCore
     method grant = True;
   endinterface;
 
+
   let vbram0 <- mkBramFromBramBE(vbram[0]);
   AcquireMaster#(Bit#(TAdd#(TLog#(numWay), TAdd#(offsetW, indexW))), `TL_ARGS) acquireM <-
     mkAcquireMaster(logSize, slave, arbiter, vbram0);
@@ -159,19 +175,21 @@ module mkBCacheCore
 
   Reg#(Bit#(indexW)) index <- mkReg(0);
   Reg#(Bit#(offsetW)) offset <- mkReg(0);
-  Reg#(BCacheInfo#(numWay, tagW, dataW)) info <- mkReg(?);
+  Reg#(BCacheInfo#(atomicOp, numWay, tagW, dataW)) info <- mkReg(?);
   Reg#(BCacheProbeInfo#(tagW, indexW, offsetW)) probe <- mkReg(?);
   Ehr#(2, CacheState) state <- mkEhr(Idle);
   Reg#(CacheState) nextState <- mkReg(?);
-
-  // Length of a cache line
 
   Reg#(Bit#(32)) numHit <- mkReg(0);
   Reg#(Bit#(32)) numMis <- mkReg(0);
 
   Reg#(Bit#(sourceW)) source <- mkReg(?);
 
-  function Action doMiss(Token#(numWay) way, Bit#(tagW) tag, CacheOp#(dataW) op, TLPerm perm);
+  // Saved informations at matching stage to perform atomic operations
+  Reg#(CacheOp#(atomicOp, dataW)) pendingOp <- mkReg(?);
+  Reg#(Bit#(TAdd#(TLog#(numWay), TAdd#(offsetW, indexW)))) pendingPos <- mkReg(?);
+
+  function Action doMiss(Token#(numWay) way, Bit#(tagW) tag, CacheOp#(atomicOp, dataW) op, TLPerm perm);
     action
       let tmp = info;
       tmp.perm = perm;
@@ -182,29 +200,24 @@ module mkBCacheCore
     endaction
   endfunction
 
-  rule releasePermsAck if (state[0] == AcqRel || state[0] == ReleaseNoAcq);
-    state[0] <= state[0] == ReleaseNoAcq ? Acquire : Idle;
-    releaseM.releaseAck();
-  endrule
-
-  rule releaseBlockAck if (state[0] == Release);
+  rule releaseBlockAck if (state[0] == Release && started);
     acquireM.acquireBlock(NtoT, {info.way, index, 0}, conf.encode(info.tag, index, 0));
     releaseM.releaseAck();
     state[0] <= Acquire;
   endrule
 
-  rule acquireBlockAck if (state[0] == Acquire || state[0] == AcqRel);
+  rule acquireBlockAck if (state[0] == Acquire && started);
     let perm <- acquireM.acquireAck();
 
     doAssert(perm >= info.perm, "Receive smaller permission than needed");
 
-    perm = needPermT(info.op) && info.op != LoadReserve ? D : perm;
+    perm = needPermT(info.op) && !isLoadReserve(info.op) ? D : perm;
     tagRam[info.way].write(index, info.tag);
     permRam[info.way].write(index, perm);
 
-    state[0] <= state[0] == Acquire ? Idle : ReleaseNoAcq;
+    state[0] <= Idle;
 
-    if (info.op == LoadReserve) reserve();
+    if (isLoadReserve(info.op)) reserve();
 
     case (info.op) matches
       Load : dataRam.read({info.way, index, offset});
@@ -214,7 +227,10 @@ module mkBCacheCore
     endcase
   endrule
 
-  rule lookupProbe if (state[1] == Idle || state[1] == Acquire && reservedTimer[1] == 0);
+  Bool canProbe =
+    (state[1] == Idle || state[1] == Acquire) && reservedTimer[1] == 0 && releaseM.canProbe;
+
+  rule lookupProbe if (canProbe && started);
     match {.addr, .perm} <- releaseM.probeStart();
 
     match {.tag, .idx, .off} = conf.decode(addr);
@@ -235,7 +251,7 @@ module mkBCacheCore
     nextState <= state[1];
   endrule
 
-  rule matchProbe if (state[0] == ProbeMatching);
+  rule matchProbe if (state[0] == ProbeMatching && started);
     Bit#(tagW) tag = ?;
     Token#(numWay) way = ?;
     TLPerm perm = N;
@@ -279,13 +295,13 @@ module mkBCacheCore
     state[0] <= ProbeWait;
   endrule
 
-  rule finishProbe if (state[0] == ProbeWait);
+  rule finishProbe if (state[0] == ProbeWait && started);
     releaseM.probeFinish();
     state[0] <= nextState;
   endrule
 
   method Action lookup(Bit#(indexW) idx, Bit#(offsetW) off)
-    if (state[1] == Idle);
+    if (state[1] == Idle && !canProbe && started);
     action
       index <= idx;
       offset <= off;
@@ -298,8 +314,17 @@ module mkBCacheCore
     endaction
   endmethod
 
-  method Action matching(Bit#(tagW) t, CacheOp#(dataW) op)
-    if (state[0] == Matching && dataRam.canRead);
+  method Action abort if (state[0] == Matching && started);
+    lruRam.deq;
+    state[0] <= Idle;
+    for (Integer i=0; i < valueOf(numWay); i = i + 1) begin
+      permRam[i].deq;
+      tagRam[i].deq;
+    end
+  endmethod
+
+  method Action matching(Bit#(tagW) t, CacheOp#(atomicOp, dataW) op)
+    if (state[0] == Matching && dataRam.canRead && started);
     action
       doAssert(2**log2(valueOf(numWay)) == valueOf(numWay), "\"numWay\" must be a power of 2");
 
@@ -322,7 +347,7 @@ module mkBCacheCore
       end
 
       Bool hit = perm >= T || (perm == B && !needPermT(op));
-      Bool stop = op == Stop || (!hit && isStoreConditional(op));
+      Bool stop = !hit && isStoreConditional(op);
 
       if (!stop) lruRam.write(index, PLRU::next(lru, way));
 
@@ -334,8 +359,11 @@ module mkBCacheCore
       if (isStoreConditional(op))
         successQ.enq(hit && reserved);
 
-      if (hit && op == LoadReserve) reserve();
+      if (hit && isLoadReserve(op)) reserve();
       else unreserve();
+
+      pendingOp <= op;
+      pendingPos <= {way, index, offset};
 
       if (stop) state[0] <= Idle;
       else if (hit) begin
@@ -352,7 +380,7 @@ module mkBCacheCore
         endcase
 
         // Set the cache block as dirty
-        if (needPermT(op) && op != LoadReserve) permRam[way].write(index, D);
+        if (needPermT(op) && !isLoadReserve(op)) permRam[way].write(index, D);
 
       end else if (t != tag && permRam[way].response != N) begin
 
@@ -368,13 +396,6 @@ module mkBCacheCore
         case (permRam[way].response) matches
           D: state[0] <= Release;
           default: state[0] <= Release;
-          //default: begin
-          //  state[0] <= AcqRel;
-          //  acquireM.acquireBlock(
-          //    needPermT(op) ? (perm == N ? NtoT : BtoT) : NtoB,
-          //    {way, index,0}, address
-          //  );
-          //end
         endcase
 
         doMiss(way, t, op, needPermT(op) ? T : B);
@@ -391,9 +412,19 @@ module mkBCacheCore
     endaction
   endmethod
 
-  method ActionValue#(Bit#(dataW)) response;
+  method ActionValue#(Bit#(dataW)) loadResponse
+    if (started && (isLoad(pendingOp) || isLoadReserve(pendingOp)));
     dataRam.deq();
-    return dataRam.response();
+
+    return dataRam.response;
+  endmethod
+
+  method ActionValue#(Bit#(dataW)) atomicResponse
+    if (started &&& pendingOp matches tagged Atomic .atomic);
+    dataRam.write(pendingPos, conf.atomic(atomic, dataRam.response), ~0);
+    dataRam.deq();
+
+    return dataRam.response;
   endmethod
 
   method ActionValue#(Bool) success;
@@ -401,9 +432,10 @@ module mkBCacheCore
     return successQ.first;
   endmethod
 
-  method Action setSource(Bit#(sourceW) src);
+  method Action setSource(Bit#(sourceW) src) if (!started);
     action
       source <= src;
+      started <= True;
       acquireM.setSource(src);
       releaseM.setSource(src);
     endaction

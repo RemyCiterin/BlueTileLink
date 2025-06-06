@@ -187,9 +187,11 @@ module mkTestBCache#(Bit#(SourceW) source) (TestBCache);
   function Tuple3#(Bit#(20),Bit#(6),Bit#(4)) decode(Bit#(32) addr) =
     tuple3(addr[31:12], addr[11:6], addr[5:2]);
 
+  function Bit#(32) atomic(void op, Bit#(32) value) = 0;
+
   Integer nCache = valueOf(NCache);
-  BCacheCore#(2, Bit#(20), Bit#(6), Bit#(4), AddrW, DataW, SizeW, SourceW, SinkW)
-    cache <- mkBCacheCore(BCacheConf{encode: encode, decode: decode},slave);
+  BCacheCore#(void, 2, Bit#(20), Bit#(6), Bit#(4), AddrW, DataW, SizeW, SourceW, SinkW)
+    cache <- mkBCacheCore(BCacheConf{encode: encode, decode: decode, atomic: atomic},slave);
 
   rule deqEvict;
     cache.evict.deq;
